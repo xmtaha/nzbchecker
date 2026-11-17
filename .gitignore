@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+nzb_checker.log
+.codegraph/
+*.AppImage
+!NZB-Checker-x86_64.AppImage

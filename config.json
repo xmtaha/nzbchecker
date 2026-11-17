@@ -6,7 +6,7 @@
         "username": "your_username",
         "password": "your_password",
         "use_ssl": true,
-        "connections": 10
+        "connections": 50
     },
     "paths": {
         "nzb_folder": "C:\\nzbdenet",
@@ -16,7 +16,8 @@
     },
     "settings": {
         "check_all_articles": false,
-        "sample_check_count": 5,
+        "sample_check_count": 20,
+        "sample_ratio": 0.02,
         "timeout": 30,
         "log_level": "INFO"
     }

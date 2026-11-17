@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NZB Checker
+GenericName=Usenet NZB Checker
+Comment=NZB dosyalarındaki eksik segmentleri Usenet üzerinden denetler
+Exec=nzb-checker
+Icon=nzb-checker
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=nzb;usenet;checker;

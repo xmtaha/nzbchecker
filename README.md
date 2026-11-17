@@ -12,23 +12,45 @@ NZB dosyalarını Usenet sunucusunda kontrol eden ve eksik parçalara göre otom
 -  Detaylı log kaydı
 -  Config dosyası ile kolay yapılandırma
 -  Örnek kontrol veya tam kontrol seçeneği
--  Python 3.13+ uyumlu
+-  **Masaüstü arayüz (GUI)**: tüm ayarlar arayüzden, binlerce dosya tek seferde
+-  Python 3.9+ uyumlu (yalnızca standart kütüphane)
 
 ## Kurulum
 
-1. Python 3.8 veya üstü sürüm gereklidir:
+1. Python 3.9 veya üstü sürüm gereklidir:
 ```bash
-python --version
+python3 --version
 ```
 
-2. Bağımlılıkları yükleyin (sadece standard library kullanıldığı için gerek yok):
+2. Bağımlılık yok - sadece standart kütüphane kullanılır. GUI için tkinter gerekir
+   (Debian/Ubuntu'da eksikse: `sudo apt install python3-tk`).
+
+3. GUI'yi açıp ayarları arayüzden girin (**önerilen**), ya da `config.json` dosyasını elle düzenleyin.
+
+### AppImage (paketlenmiş sürüm)
+
+`NZB-Checker-x86_64.AppImage` tek dosyadır, kurulum gerektirmez:
+
 ```bash
-pip install -r requirements.txt
+chmod +x NZB-Checker-x86_64.AppImage
+./NZB-Checker-x86_64.AppImage
 ```
 
-3. `config.json` dosyasını düzenleyin ve kendi bilgilerinizi girin.
+Sistemdeki `python3` + `tkinter` kullanılır (yoksa uyarı gösterir:
+`sudo apt install python3-tk`). Python paket içine gömülmez, bu yüzden dosya ~1 MB'dir.
+
+Yeniden üretmek için: `./build_appimage.sh` (appimagetool'u gerekirse indirir).
 
 ## Yapılandırma
+
+Ayar dosyasının yeri:
+
+| Kullanım | Dosya |
+|---|---|
+| Masaüstü arayüz (ve AppImage) | `~/.config/nzb_checker/config.json` (ilk açılışta otomatik oluşur) |
+| Komut satırı | `config.json` (betiğin yanında) |
+
+`NZB_CHECKER_CONFIG` ortam değişkeni ile arayüzün kullanacağı dosya değiştirilebilir.
 
 `config.json` dosyasını aşağıdaki şekilde düzenleyin:
 
@@ -40,7 +62,7 @@ pip install -r requirements.txt
         "username": "kullanici_adi",      // Usenet hesap kullanıcı adı
         "password": "sifre",              // Usenet hesap şifresi
         "use_ssl": true,                  // SSL kullanımı (önerilen)
-        "connections": 10                 // Paralel bağlantı sayısı (aynı anda kaç NZB kontrol edilecek)
+        "connections": 50                 // Eşzamanlı bağlantı sayısı (provider limitine göre; tipik 50-60)
     },
     "paths": {
         "nzb_folder": "C:\\nzb_files",    // NZB dosyalarının bulunduğu klasör
@@ -50,7 +72,8 @@ pip install -r requirements.txt
     },
     "settings": {
         "check_all_articles": false,      // true: tüm segmentleri kontrol et
-        "sample_check_count": 5,          // Örnek kontrol sayısı
+        "sample_check_count": 20,         // En az kaç segment kontrol edilsin
+        "sample_ratio": 0.02,             // Ayrıca dosyanın bu kadarı kontrol edilir (0.02 = %2)
         "timeout": 30,                    // Bağlantı timeout (saniye)
         "log_level": "INFO"               // Log seviyesi: DEBUG, INFO, WARNING, ERROR
     }
@@ -59,23 +82,46 @@ pip install -r requirements.txt
 
 ## Kullanım
 
-### Basit kullanım:
+### Masaüstü arayüz (önerilen):
 ```bash
-python nzb_checker.py
+python3 nzb_gui.py         # ya da ./NZB-Checker-x86_64.AppImage
 ```
 
-### Özel config dosyası ile:
+Tüm ayarlar arayüzden yapılır (sunucu bilgileri, bağlantı sayısı, klasörler, örnekleme,
+timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config.json` dosyasına yazılır.
+
+- **Klasörü tara**: klasördeki tüm `.nzb` dosyalarını listeler (binlerce dosya sorunsuz;
+  liste partiler halinde doldurulur)
+- **Başlat / Durdur**: tarama arka planda çalışır, arayüz donmaz. Durdur, o an işlenen
+  dosyaları `cancelled` olarak işaretler ve **dosyaları taşımaz** - sonraki çalıştırmada
+  tekrar denenir
+- Canlı durum tablosu (tam/eksik/hatalı, segment/kontrol/eksik sayıları, süre),
+  "Sadece eksik/hatalı" filtresi ve arama kutusu
+- Ölçek testi: 2.000 dosya x 20 segment (40.000 STAT), 50 bağlantı -> ~3 sn (yerel sunucu)
+
+### Komut satırı:
 ```bash
-python nzb_checker.py my_config.json
+python3 nzb_checker.py                # config.json ile
+python3 nzb_checker.py my_config.json # özel config ile
+```
+
+### Test:
+```bash
+python3 test_nzb_checker.py
 ```
 
 ## Nasıl Çalışır?
 
 1. **NZB Tarama**: Belirtilen klasördeki tüm `.nzb` dosyalarını bulur
-2. **Paralel İşlem**: `connections` ayarına göre (varsayılan 10) aynı anda birden fazla NZB kontrol eder
+2. **Paralel İşlem**: `connections` kadar bağlantı açılır. Hem birden fazla NZB paralel işlenir
+   hem de **tek bir NZB'nin segmentleri bu bağlantılara bölünür** — 20.000 segmentlik dosya
+   bile tüm bağlantıları kullanır. Bağlantılar worker thread'lerce yeniden kullanılır
+   (dosya başına yeniden el sıkışma yok)
 3. **Parse**: Her NZB dosyasını parse eder ve segment bilgilerini çıkarır
 4. **Kontrol**: 
-   - `check_all_articles=false`: Örnek segmentleri kontrol eder (hızlı)
+   - `check_all_articles=false`: Örnek segmentleri kontrol eder (hızlı).
+     Kontrol edilen segment sayısı = `max(sample_check_count, toplam × sample_ratio)`,
+     dosyaya eşit yayılır (ilk ve son segment dahil)
    - `check_all_articles=true`: Tüm segmentleri kontrol eder (yavaş ama kesin)
 5. **Sınıflandırma**:
    - **complete/**: Eksik segment olmayan dosyalar
@@ -120,7 +166,8 @@ Klasörler:
 - **Hızlı Kontrol**: `check_all_articles: false` ile örnek kontrol yapın (önerilen)
 - **Kesin Kontrol**: `check_all_articles: true` ile tüm segmentleri kontrol edin
 - **Büyük Arşivler**: Büyük arşivler için önce örnek kontrolle başlayın
-- **Paralel İşlem**: `connections` değerini artırarak (örn: 20) daha hızlı tarama yapabilirsiniz
+- **Paralel İşlem**: `connections` değerini provider limitine kadar artırın (tipik 50-60; fazlası `502 too many connections` verir)
+- **Tam Tarama Hızı**: `check_all_articles: true` ile 20.000 segment, 50 bağlantıda ~400 STAT/bağlantı → 30 ms RTT ile ~12 s
 - **Log Dosyası**: Tüm işlemler `nzb_checker.log` dosyasına kaydedilir
 - **Performans**: Usenet provider'ınız çok bağlantıya izin veriyorsa `connections` değerini artırın
 
