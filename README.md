@@ -29,7 +29,8 @@ python3 --version
 
 ### AppImage (paketlenmiş sürüm)
 
-`NZB-Checker-x86_64.AppImage` tek dosyadır, kurulum gerektirmez:
+İndir: https://github.com/xmtaha/nzbchecker/releases/latest (dosya: `NZB-Checker-x86_64.AppImage`).
+Tek dosyadır, kurulum gerektirmez:
 
 ```bash
 chmod +x NZB-Checker-x86_64.AppImage

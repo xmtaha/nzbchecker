@@ -3,4 +3,3 @@ __pycache__/
 nzb_checker.log
 .codegraph/
 *.AppImage
-!NZB-Checker-x86_64.AppImage
