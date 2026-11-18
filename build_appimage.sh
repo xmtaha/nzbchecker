@@ -18,6 +18,7 @@ appdir=/tmp/NZB-Checker.AppDir
 rm -rf "$appdir"
 mkdir -p "$appdir/usr/src"
 cp nzb_gui.py nzb_checker.py nntp_client.py "$appdir/usr/src/"
+cp -r tkdnd "$appdir/usr/src/tkdnd"
 cp AppRun "$appdir/AppRun"
 cp nzb-checker.desktop "$appdir/nzb-checker.desktop"
 cp nzb-checker.png "$appdir/nzb-checker.png"

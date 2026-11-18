@@ -22,6 +22,9 @@ EXIST |= {'ok-m1@test', 'ok-m2@test', 'ok-m4@test', 'drop-1@test', 'ok-d2@test'}
 BIG = {f'ok-big-{i}@test' for i in range(300) if i % 6 != 0}  # 50 tanesi yok
 EXIST |= BIG
 
+# port -> sunucudaki makale kumesi (coklu provider testi farkli portlar kullanir)
+EXIST_BY_PORT = {}
+
 SEEN = {'stat': 0, 'conns': 0, 'max_conns': 0}
 SEEN_LOCK = threading.Lock()
 
@@ -52,7 +55,8 @@ class Handler(socketserver.StreamRequestHandler):
                     mid = cmd.split(None, 1)[1].strip('<>')
                     if mid.startswith('drop'):
                         return  # baglantiyi kes
-                    self.send('223 0 <%s>' % mid if mid in EXIST else '430 no such article')
+                    known = EXIST_BY_PORT.get(self.server.server_address[1], EXIST)
+                    self.send('223 0 <%s>' % mid if mid in known else '430 no such article')
                 elif upper == 'QUIT':
                     self.send('205 bye')
                     return
@@ -82,10 +86,12 @@ def nzb(ids):
             '    <segments>\n' + segments + '\n    </segments>\n  </file>\n</nzb>\n')
 
 
-def write_config(tmp, nzb_dir, port, **settings):
+def write_config(tmp, nzb_dir, port, providers=None, **settings):
+    if providers is None:
+        providers = [{'name': 'P1', 'host': '127.0.0.1', 'port': port, 'username': 'u',
+                      'password': 'p', 'use_ssl': False, 'connections': 8}]
     config = {
-        'usenet_provider': {'host': '127.0.0.1', 'port': port, 'username': 'u',
-                            'password': 'p', 'use_ssl': False, 'connections': 8},
+        'providers': providers,
         'paths': {'nzb_folder': str(nzb_dir), 'complete_folder': 'complete',
                   'missing_folder': 'missing', 'error_folder': 'error'},
         'settings': {'check_all_articles': False, 'sample_check_count': 20,
@@ -202,17 +208,51 @@ def test_iptal(tmp, port, capture):
     assert len(kalan) == 5, f'iptal edilen dosyalar tasinmamali: {kalan}'
 
 
+def test_coklu_provider(tmp, port2, port, capture):
+    """Iki provider: segment ancak HER IKISINDE yoksa eksik sayilir"""
+    nzb_dir = Path(tmp) / 'multi'
+    nzb_dir.mkdir()
+    ids = [f'multi-a{i}@test' for i in range(4)] + ['multi-gone@test']
+    (nzb_dir / 'multi.nzb').write_text(nzb(ids), encoding='utf-8')
+
+    # ikinci saglayici yalnizca 'multi-a0' makalesini bilmiyor
+    EXIST_BY_PORT[port2] = set(EXIST) | {f'multi-a{i}@test' for i in range(1, 4)}
+    providers = [
+        {'name': 'P1', 'host': '127.0.0.1', 'port': port, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 4},
+        {'name': 'P2', 'host': '127.0.0.1', 'port': port2, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 4},
+    ]
+
+    del capture.messages[:]
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, providers=providers,
+                                          check_all_articles=True)))
+    checker.process_nzb_files()
+
+    placed = placed_in(nzb_dir)
+    assert placed['missing'] == ['multi.nzb'], placed
+    assert [p['name'] for p in checker.providers] == ['P1', 'P2'], checker.providers
+    assert checker.max_workers == 8, checker.max_workers
+    # P1'e 5, P2'ye 4 makale soruldu (P2 sadece 4'unu tanir, biri eksik)
+    assert len(EXIST_BY_PORT[port2]) > 0
+    assert any('P1' in m and 'P2' in m for m in capture.messages), capture.messages[-5:]
+
 def main():
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     server = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
 
+    server2 = socketserver.ThreadingTCPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server2.serve_forever, daemon=True).start()
+    port2 = server2.server_address[1]
+
     capture = Capture()
     logging.getLogger().addHandler(capture)
 
     with tempfile.TemporaryDirectory() as tmp:
         os.chdir(tmp)  # log dosyasi cwd'ye yazilir
+        test_coklu_provider(tmp, port2, port, capture)
         test_siniflandirma(tmp, port, capture)
         test_paralel_tam_tarama(tmp, port, capture)
         test_tam_dosya(tmp, port, capture)
@@ -220,6 +260,7 @@ def main():
         test_iptal(tmp, port, capture)
 
     server.shutdown()
+    server2.shutdown()
     print('OK - tum senaryolar gecti (max eszamanli baglanti: %d)' % SEEN['max_conns'])
 
 

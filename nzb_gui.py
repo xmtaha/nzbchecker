@@ -21,6 +21,9 @@ from nzb_checker import NZBChecker
 
 # Ayar dosyası: NZB_CHECKER_CONFIG > ~/.config/nzb_checker/config.json
 # (AppImage salt okunur olduğu için script klasörüne yazılamaz)
+# tkdnd Tcl paketi (sürükle-bırak); AppImage'da da yanında taşınır
+DND_DIR = Path(__file__).with_name('tkdnd')
+
 CONFIG_PATH = Path(os.environ.get('NZB_CHECKER_CONFIG')
                    or Path.home() / '.config' / 'nzb_checker' / 'config.json')
 
@@ -45,26 +48,28 @@ STATUS_TEXT = {
 }
 VISIBLE_WHEN_FILTERED = ('missing', 'error', 'cancelled')
 
+DEFAULT_PROVIDER = {'name': 'Sağlayıcı 1', 'host': '', 'port': 563, 'username': '',
+                    'password': '', 'use_ssl': True, 'connections': 20}
+
 DEFAULTS = {
-    'usenet_provider': {'host': '', 'port': 563, 'username': '', 'password': '',
-                        'use_ssl': True, 'connections': 50},
+    'providers': [dict(DEFAULT_PROVIDER)],
     'paths': {'nzb_folder': str(Path.home() / 'nzb'), 'complete_folder': 'complete',
               'missing_folder': 'missing', 'error_folder': 'error'},
     'settings': {'check_all_articles': False, 'sample_check_count': 20,
                  'sample_ratio': 0.02, 'timeout': 30, 'log_level': 'INFO'},
 }
 
-# (bölüm, anahtar, etiket, tip)
-SERVER_FIELDS = [
-    ('usenet_provider', 'host', 'Sunucu', str),
-    ('usenet_provider', 'port', 'Port', int),
-    ('usenet_provider', 'username', 'Kullanıcı adı', str),
-    ('usenet_provider', 'password', 'Şifre', 'secret'),
-    ('usenet_provider', 'connections', 'Eşzamanlı bağlantı', int),
-    ('usenet_provider', 'use_ssl', 'SSL kullan', bool),
+# provider düzenleyicisi: (anahtar, etiket, tip)
+PROVIDER_FIELDS = [
+    ('name', 'Ad', str),
+    ('host', 'Sunucu', str),
+    ('port', 'Port', int),
+    ('username', 'Kullanıcı adı', str),
+    ('password', 'Şifre', 'secret'),
+    ('connections', 'Eşzamanlı bağlantı', int),
+    ('use_ssl', 'SSL kullan', bool),
 ]
 PATH_FIELDS = [
-    ('paths', 'nzb_folder', 'NZB klasörü', 'dir'),
     ('paths', 'complete_folder', 'Tam klasörü', str),
     ('paths', 'missing_folder', 'Eksik klasörü', str),
     ('paths', 'error_folder', 'Hatalı klasörü', str),
@@ -76,7 +81,7 @@ CHECK_FIELDS = [
     ('settings', 'timeout', 'Timeout (sn)', int),
     ('settings', 'log_level', 'Log seviyesi', ('DEBUG', 'INFO', 'WARNING', 'ERROR')),
 ]
-SPEC = SERVER_FIELDS + PATH_FIELDS + CHECK_FIELDS
+SPEC = PATH_FIELDS + CHECK_FIELDS
 
 # --- palet -----------------------------------------------------------------
 BG = '#131519'
@@ -138,6 +143,7 @@ class App(tk.Tk):
         self.worker = None
 
         self.config_data = self._read_config()
+        self.nzb_folder = str(self.config_data.get('paths', {}).get('nzb_folder') or '')
         self.vars = {}
 
         self._setup_style()
@@ -274,10 +280,28 @@ class App(tk.Tk):
         self._build_settings()
 
     def _build_files(self):
+        drop = tk.Frame(self.files_tab, bg=SURFACE_2, padx=16, pady=12,
+                        highlightthickness=2, highlightbackground=BORDER)
+        drop.pack(fill='x', padx=12, pady=(12, 0))
+        self.drop_zone = drop
+
+        self.drop_title = tk.Label(drop, text='NZB klasörünü buraya sürükleyin',
+                                   bg=SURFACE_2, fg=TEXT, font=(self.ui_font, 12, 'bold'))
+        self.drop_title.pack(anchor='w')
+        self.drop_path = tk.Label(
+            drop, text=self.nzb_folder or 'Henüz klasör seçilmedi (sürükleyin veya seçin)',
+            bg=SURFACE_2, fg=TEXT if self.nzb_folder else MUTED, font=(self.ui_font, 9))
+        self.drop_path.pack(anchor='w', pady=(2, 10))
+
+        row = tk.Frame(drop, bg=SURFACE_2)
+        row.pack(anchor='w')
+        self._button(row, 'Klasör seç', self.choose_folder).pack(side='left')
+        self._button(row, 'Klasörü tara', self.scan_folder).pack(side='left', padx=(8, 0))
+
+        self._setup_dnd(drop, self.drop_title, self.drop_path, row)
+
         bar = tk.Frame(self.files_tab, bg=SURFACE, padx=12, pady=10)
         bar.pack(fill='x')
-
-        self._button(bar, 'Klasörü tara', self.scan_folder).pack(side='left')
 
         self.only_problems = tk.BooleanVar(value=False)
         tk.Checkbutton(bar, text='Sadece eksik/hatalı', variable=self.only_problems,
@@ -303,14 +327,15 @@ class App(tk.Tk):
         body = tk.Frame(self.files_tab, bg=SURFACE)
         body.pack(fill='both', expand=True, padx=12, pady=(0, 12))
 
-        columns = ('name', 'status', 'segments', 'checked', 'missing', 'elapsed')
+        columns = ('name', 'status', 'segments', 'checked', 'missing', 'percent', 'elapsed')
         self.tree = ttk.Treeview(body, columns=columns, show='headings', selectmode='extended')
         for column, title, width, anchor in (
-                ('name', 'Dosya', 430, 'w'),
+                ('name', 'Dosya', 400, 'w'),
                 ('status', 'Durum', 120, 'w'),
                 ('segments', 'Segment', 90, 'e'),
                 ('checked', 'Kontrol', 90, 'e'),
                 ('missing', 'Eksik', 90, 'e'),
+                ('percent', 'Eksik %', 90, 'e'),
                 ('elapsed', 'Süre', 90, 'e')):
             self.tree.heading(column, text=title, anchor=anchor)
             self.tree.column(column, width=width, anchor=anchor,
@@ -329,12 +354,95 @@ class App(tk.Tk):
     def _build_settings(self):
         wrap = tk.Frame(self.settings_tab, bg=SURFACE, padx=12, pady=12)
         wrap.pack(fill='both', expand=True)
-        for column in range(3):
+        for column in range(2):
             wrap.columnconfigure(column, weight=1, uniform='settings')
 
-        self._field_group(wrap, 'Usenet sunucu', 0, SERVER_FIELDS)
+        self._build_providers(wrap)
         self._field_group(wrap, 'Klasörler', 1, PATH_FIELDS)
         self._field_group(wrap, 'Kontrol', 2, CHECK_FIELDS)
+
+    def _build_providers(self, parent):
+        """Provider listesi: kullanıcı istediği kadar ekleyip silebilir"""
+        group = tk.Frame(parent, bg=SURFACE, highlightthickness=1,
+                         highlightbackground=BORDER, padx=14, pady=12)
+        group.grid(row=0, column=0, sticky='nsew', padx=(0, 12))
+
+        tk.Label(group, text='Usenet sağlayıcıları', bg=SURFACE, fg=TEXT,
+                 font=(self.ui_font, 11, 'bold')).grid(row=0, column=0, sticky='w')
+        self._button(group, '+ Ekle', self.add_provider).grid(row=0, column=1, sticky='e')
+        group.columnconfigure(0, weight=1)
+
+        self.provider_box = tk.Frame(group, bg=SURFACE)
+        self.provider_box.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(10, 0))
+        group.rowconfigure(1, weight=1)
+
+        self.provider_forms = []
+        for provider in self.config_data.get('providers') or [dict(DEFAULT_PROVIDER)]:
+            self._add_provider_form(provider)
+
+    def _add_provider_form(self, provider):
+        """Tek provider kartı"""
+        card = tk.Frame(self.provider_box, bg=SURFACE_2, highlightthickness=1,
+                        highlightbackground=BORDER, padx=12, pady=10)
+        card.pack(fill='x', pady=(0, 8))
+
+        head = tk.Frame(card, bg=SURFACE_2)
+        head.pack(fill='x')
+        title = tk.Label(head, text=provider.get('name') or 'Sağlayıcı', bg=SURFACE_2,
+                         fg=TEXT, font=(self.ui_font, 10, 'bold'))
+        title.pack(side='left')
+
+        vars_ = {}
+        remove = self._button(head, 'Kaldır', None)
+        remove.config(command=lambda: self.remove_provider(card))
+        remove.pack(side='right')
+
+        rows = tk.Frame(card, bg=SURFACE_2)
+        rows.pack(fill='x', pady=(8, 0))
+        rows.columnconfigure(1, weight=1)
+        rows.columnconfigure(3, weight=1)
+
+        for position, (key, label, kind) in enumerate(PROVIDER_FIELDS):
+            value = provider.get(key, DEFAULT_PROVIDER.get(key))
+            if kind is bool:
+                var = tk.BooleanVar(value=bool(value))
+                widget = tk.Checkbutton(rows, variable=var, bg=SURFACE_2,
+                                        activebackground=SURFACE_2, selectcolor=SURFACE,
+                                        bd=0, highlightthickness=0)
+            else:
+                var = tk.StringVar(value='' if value is None else str(value))
+                widget = tk.Entry(rows, textvariable=var, bg=SURFACE, fg=TEXT,
+                                  insertbackground=TEXT, relief='flat', highlightthickness=1,
+                                  highlightbackground=BORDER, highlightcolor=ACCENT,
+                                  show='*' if kind == 'secret' else '',
+                                  font=(self.ui_font, 10))
+
+            row, column = divmod(position, 2)
+            tk.Label(rows, text=label, bg=SURFACE_2, fg=MUTED,
+                     font=(self.ui_font, 9)).grid(row=row * 2, column=column * 2,
+                                                  sticky='w', padx=(0, 8), pady=(4, 0))
+            widget.grid(row=row * 2 + 1, column=column * 2, columnspan=2,
+                        sticky='w' if kind is bool else 'we',
+                        padx=(0, 14), pady=(0, 6), ipady=0 if kind is bool else 4)
+            vars_[key] = var
+
+        self.provider_forms.append({'card': card, 'vars': vars_, 'title': title})
+
+    def add_provider(self):
+        number = len(self.provider_forms) + 1
+        provider = dict(DEFAULT_PROVIDER)
+        provider['name'] = f'Sağlayıcı {number}'
+        self._add_provider_form(provider)
+        self.provider_box.update_idletasks()
+
+    def remove_provider(self, card):
+        if len(self.provider_forms) <= 1:
+            messagebox.showinfo('Sağlayıcı', 'En az bir sağlayıcı kalmalı.')
+            return
+        for form in list(self.provider_forms):
+            if form['card'] is card:
+                self.provider_forms.remove(form)
+        card.destroy()
 
         footer = tk.Frame(self.settings_tab, bg=SURFACE, padx=12)
         footer.pack(fill='x', pady=(0, 12))
@@ -424,10 +532,42 @@ class App(tk.Tk):
         except Exception:
             data = {}
         for section, values in DEFAULTS.items():
+            if isinstance(values, list):
+                continue
             merged = dict(values)
-            merged.update(data.get(section, {}))
+            merged.update(data.get(section, {}) or {})
             data[section] = merged
+        # eski tek sunucu biçimini listeye çevir
+        if not data.get('providers'):
+            legacy = data.get('usenet_provider')
+            data['providers'] = [legacy] if legacy else [dict(DEFAULT_PROVIDER)]
+        data.pop('usenet_provider', None)
         return data
+
+    def _provider_values(self):
+        """Formdaki provider kartlarını config biçimine çevir"""
+        providers = []
+        for form in self.provider_forms:
+            item = {}
+            for key, label, kind in PROVIDER_FIELDS:
+                raw = form['vars'][key].get()
+                if kind is bool:
+                    item[key] = bool(raw)
+                elif kind is int:
+                    try:
+                        item[key] = int(float(str(raw).strip().replace(',', '.')))
+                    except ValueError:
+                        raise ValueError(f'{label}: sayı bekleniyor ({raw!r})')
+                else:
+                    item[key] = str(raw).strip()
+            if not item['host']:
+                raise ValueError(f"{item['name'] or 'Sağlayıcı'}: sunucu adresi boş")
+            if not item['name']:
+                item['name'] = item['host']
+            providers.append(item)
+        if not providers:
+            raise ValueError('En az bir sağlayıcı gerekli')
+        return providers
 
     def _pick_dir(self, var):
         folder = filedialog.askdirectory(initialdir=var.get() or str(Path.home()))
@@ -436,6 +576,8 @@ class App(tk.Tk):
 
     def _save_config(self):
         data = json.loads(CONFIG_PATH.read_text(encoding='utf-8')) if CONFIG_PATH.exists() else {}
+        data.pop('usenet_provider', None)
+        data['providers'] = self._provider_values()
         for section, key, _label, kind in SPEC:
             raw = self.vars[key].get()
             if kind is bool:
@@ -447,6 +589,8 @@ class App(tk.Tk):
             else:
                 raw = str(raw).strip()
             data.setdefault(section, {})[key] = raw
+        if self.nzb_folder:
+            data.setdefault('paths', {})['nzb_folder'] = self.nzb_folder
         data.setdefault('_comment', 'NZB Checker ayarları (GUI tarafından yazılır)')
         CONFIG_PATH.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding='utf-8')
 
@@ -472,8 +616,10 @@ class App(tk.Tk):
         self.count_label.config(text='0 dosya')
         self._refresh_counts()
 
-    def _upsert(self, name, status, segments=0, checked=0, missing=0, elapsed=0.0):
+    def _upsert(self, name, status, segments=0, checked=0, missing=0, elapsed=0.0,
+                percent=None):
         values = (name, STATUS_TEXT.get(status, status), segments, checked, missing,
+                  f'%{percent:.1f}' if percent else '',
                   f'{elapsed:.1f}s' if elapsed else '')
         entry = self.rows.get(name)
         if entry is None:
@@ -522,13 +668,69 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------- tarama
 
-    def scan_folder(self):
+    # ---------------------------------------------------- sürükle-bırak (tkdnd)
+
+    def _setup_dnd(self, *widgets):
+        """
+        Klasör sürükle-bırak desteği.
+
+        tkdnd Tcl paketi beklenir (tkdnd/ klasörü); yoksa sessizce atlanır,
+        kullanıcı "Klasör seç" düğmesini kullanmaya devam eder.
+        """
         try:
-            folder = Path(self.vars['nzb_folder'].get().strip())
-        except Exception:
-            folder = None
+            self.tk.eval(f'lappend auto_path {{{DND_DIR}}}')
+            self.tk.eval('package require tkdnd')
+        except tk.TclError as exc:
+            self.dnd_ready = False
+            logging.getLogger(__name__).debug('tkdnd yüklenemedi: %s', exc)
+            return
+
+        self.dnd_ready = True
+        for widget in widgets:
+            self.tk.call('tkdnd::drop_target', 'register', widget._w, 'DND_Files')
+            widget.bind('<<Drop>>', self._on_drop, add='+')
+            widget.bind('<<DropEnter>>', lambda _e: self.drop_zone.config(
+                highlightbackground=ACCENT), add='+')
+            widget.bind('<<DropLeave>>', lambda _e: self.drop_zone.config(
+                highlightbackground=BORDER), add='+')
+
+    def _on_drop(self, event):
+        """Bırakılan dosya/klasör yolunu al -> klasör olarak ayarla"""
+        self.drop_zone.config(highlightbackground=BORDER)
+        paths = [p for p in self.tk.splitlist(event.data) if p]
+        if not paths:
+            return
+        self.set_folder(paths[0], scan=True)
+
+    def choose_folder(self):
+        """Klasör seç ve tara"""
+        folder = filedialog.askdirectory(initialdir=self.nzb_folder or str(Path.home()),
+                                         title='NZB klasörü seç')
+        if folder:
+            self.set_folder(folder, scan=True)
+
+    def set_folder(self, folder, scan=False):
+        """
+        NZB klasörünü ayarla (sürükle-bırak veya seçim).
+
+        Sürükle-bırak bir dosya yolu da verebilir; o zaman üst klasörü kullanılır.
+        """
+        path = Path(str(folder).strip().strip('{}').strip()).expanduser()
+        if path.is_file():
+            path = path.parent
+        if not path.is_dir():
+            messagebox.showerror('Klasör', f'Klasör bulunamadı: {path}')
+            return False
+        self.nzb_folder = str(path)
+        self.drop_path.config(text=self.nzb_folder, fg=TEXT)
+        if scan:
+            self.scan_folder()
+        return True
+
+    def scan_folder(self):
+        folder = Path(self.nzb_folder) if self.nzb_folder else None
         if not folder or not folder.is_dir():
-            messagebox.showerror('Klasör', f'Klasör bulunamadı: {folder}')
+            self.choose_folder()
             return
 
         files = sorted(p.name for p in folder.iterdir()
@@ -610,7 +812,12 @@ class App(tk.Tk):
             status = data.get('status', 'error')
             self._upsert(data['name'], status, segments=data.get('segments', 0),
                          checked=data.get('checked', 0), missing=data.get('missing', 0),
-                         elapsed=data.get('elapsed', 0.0))
+                         elapsed=data.get('elapsed', 0.0),
+                         percent=data.get('percent') or None)
+            providers = data.get('providers') or []
+            if len(providers) > 1:
+                self._log('INFO', f"{data['name']}: " + ', '.join(
+                    f"{p['name']} %{p['percent']:.1f}" for p in providers))
             if status in self.counts:
                 self.counts[status] += 1
             self._refresh_counts()

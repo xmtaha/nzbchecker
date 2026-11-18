@@ -1,15 +1,18 @@
 {
-    "_comment": "Usenet Provider Ayarları: host (örn: news.provider.com), port (SSL için 563), username, password, use_ssl (true ise portu SSL ile uyumlu ayarla), connections (bağlantı sayısı)",
-    "usenet_provider": {
-        "host": "news.provider.com",
-        "port": 563,
-        "username": "your_username",
-        "password": "your_password",
-        "use_ssl": true,
-        "connections": 50
-    },
+    "_comment": "providers: istediğiniz kadar Usenet sağlayıcı ekleyin. Her NZB tüm sağlayıcılarda kontrol edilir; segment ancak hiçbirinde yoksa eksik sayılır.",
+    "providers": [
+        {
+            "name": "Sağlayıcı 1",
+            "host": "news.provider.com",
+            "port": 563,
+            "username": "your_username",
+            "password": "your_password",
+            "use_ssl": true,
+            "connections": 30
+        }
+    ],
     "paths": {
-        "nzb_folder": "C:\\nzbdenet",
+        "nzb_folder": "",
         "complete_folder": "complete",
         "missing_folder": "missing",
         "error_folder": "error"

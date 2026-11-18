@@ -1,0 +1,5 @@
+tkdnd 2.9.5 - Tcl/Tk drag & drop extension
+Kaynak: Fedora tkdnd-2.9.5-5.fc45.x86_64 (Tcl 9.0 derlemesi)
+Lisans: Tcl/Tk lisansi (BSD benzeri) - https://core.tcl-lang.org/tkdnd/
+Icerik: Linux x86_64 / Tcl 9.0 icin derlenmis ikili (libtcl9tkdnd2.9.5.so) ve Tcl betikleri.
+Amac: NZB Checker arayuzunde klasor surukle-birak destegi.
