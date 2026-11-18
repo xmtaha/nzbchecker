@@ -13,7 +13,9 @@ GREEN = '#3fb950'
 AMBER = '#d9a220'
 RED = '#f2545b'
 GREY = '#7c8697'
+STRIPE = '#1f232b'      # zebra satır rengi (tek numaralı satırlar)
 
+# durum rozeti: (renk, kısa etiket)
 STATUS_COLOR = {'complete': GREEN, 'missing': AMBER, 'error': RED,
                 'cancelled': GREY, 'running': ACCENT, 'queued': MUTED}
 
@@ -37,6 +39,7 @@ PATH_FIELDS = [
 ]
 CHECK_FIELDS = [
     ('settings', 'check_all_articles', 'Tüm segmentleri kontrol et', bool),
+    ('settings', 'auto_escalate', 'Örnekte eksik çıkarsa tam tara', bool),
     ('settings', 'sample_check_count', 'En az örnek segment', int),
     ('settings', 'sample_ratio', 'Örnek oranı (0.02 = %2)', float),
     ('settings', 'timeout', 'Timeout (sn)', int),

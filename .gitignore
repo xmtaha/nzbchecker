@@ -7,3 +7,4 @@ nzb_checker.log
 *.egg-info/
 build/
 dist/
+.tmp/

@@ -160,13 +160,13 @@ def test_paralel_tam_tarama(tmp, port, capture):
 
 
 def test_yukseltme(tmp, port, capture):
-    """Ornekte eksik gorulurse dosya tam taramaya yukseltilir (kesin sayim)"""
+    """auto_escalate acikken ornekte eksik gorulurse dosya tam taranir"""
     nzb_dir = Path(tmp) / 'escalate'
     nzb_dir.mkdir()
     (nzb_dir / 'esc.nzb').write_text(nzb(ESC_IDS), encoding='utf-8')
 
     SEEN['stat'] = 0
-    checker = NZBChecker(str(write_config(tmp, nzb_dir, port)))
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, auto_escalate=True)))
     checker.process_nzb_files()
 
     assert placed_in(nzb_dir)['missing'] == ['esc.nzb'], placed_in(nzb_dir)
@@ -178,6 +178,24 @@ def test_yukseltme(tmp, port, capture):
     # 20 ornek + yukseltmede kalan 81 (bulunanlar tekrar sorulmaz)
     assert SEEN['stat'] == 101, f'beklenen 101 STAT, gelen {SEEN["stat"]}'
     assert any('tam taramaya' in m for m in capture.messages), capture.messages[-5:]
+
+
+def test_yukseltme_kapali(tmp, port, capture):
+    """auto_escalate kapaliyken (varsayilan) ornek tarama tam taramaya yukseltilmez"""
+    nzb_dir = Path(tmp) / 'no-escalate'
+    nzb_dir.mkdir()
+    (nzb_dir / 'esc.nzb').write_text(nzb(ESC_IDS), encoding='utf-8')
+
+    SEEN['stat'] = 0
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port)))
+    checker.process_nzb_files()
+
+    assert placed_in(nzb_dir)['missing'] == ['esc.nzb'], placed_in(nzb_dir)
+    item = checker.results[0]
+    assert item['checked_all'] is False, item
+    assert item['checked'] == 20, item
+    assert SEEN['stat'] == 20, f'yukseltme olmamali, gelen {SEEN["stat"]} STAT'
+    assert not any('tam taramaya' in m for m in capture.messages)
 
 
 def test_ornek_rozeti(tmp, port, capture):
@@ -417,6 +435,27 @@ def test_onbellek(tmp, port, capture):
 
 
 
+def test_apprun_paketi(tmp, capture):
+    """AppRun, paket kokundeki modulu bulur (PYTHONPATH olmadan calismazdi)"""
+    import shutil
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    appdir = Path(tmp) / 'AppDir'
+    (appdir / 'usr' / 'src').mkdir(parents=True)
+    shutil.copytree(root / 'nzb_checker', appdir / 'usr' / 'src' / 'nzb_checker',
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    shutil.copy(root / 'packaging' / 'AppRun', appdir / 'AppRun')
+    (appdir / 'AppRun').chmod(0o755)
+
+    # notr calisma dizini: yerel nzb_checker paketi yanlislikla bulunmasin
+    result = subprocess.run([str(appdir / 'AppRun'), '--version'],
+                            cwd=tmp, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert 'nzb-checker' in result.stdout, result.stdout
+    print('  AppRun paketi calisiyor')
+
+
 def test_guncelleme(tmp, capture):
     """Release kontrolu: surum karsilastirma, asset secimi, HTTP hatasi"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -593,6 +632,7 @@ def main():
         test_coklu_provider(tmp, port2, port, capture)
         test_saglayici_sirasi(tmp, port2, port, capture)
         test_kademeli_provider(tmp, port2, port, capture)
+        test_apprun_paketi(tmp, capture)
         test_guncelleme(tmp, capture)
         test_config_hatasi(tmp, capture)
         test_rapor(tmp, port, capture)

@@ -1,10 +1,12 @@
 #!/bin/sh
 # NZB Checker AppImage başlatıcı — sistemdeki python3 + tkinter kullanılır
 HERE="$(dirname "$(readlink -f "$0")")"
+# paket kökü: nzb_checker modülü $HERE/usr/src altında
+export PYTHONPATH="$HERE/usr/src${PYTHONPATH:+:$PYTHONPATH}"
 for py in "$NZB_PYTHON" /usr/bin/python3 /usr/local/bin/python3 python3; do
     [ -n "$py" ] || continue
     if "$py" -c 'import tkinter' >/dev/null 2>&1; then
-        exec "$py" -m nzb_checker --run "$@"
+        exec "$py" -m nzb_checker "$@"
     fi
 done
 msg="python3 veya tkinter bulunamadı.

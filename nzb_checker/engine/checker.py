@@ -100,6 +100,7 @@ class NZBChecker:
         self.results: List[Dict] = []
         settings = self.config.get('settings', {})
         self.check_all = bool(settings.get('check_all_articles', False))
+        self.auto_escalate = bool(settings.get('auto_escalate', False))
         self.sample_count = max(1, int(settings.get('sample_check_count', 20)))
         self.sample_ratio = float(settings.get('sample_ratio', 0.02))
         self.timeout = settings.get('timeout', 30)
@@ -560,13 +561,14 @@ class NZBChecker:
         """
         Örnek taramada eksik görülen dosyayı tam taramaya yükseltir.
 
-        Örnekte tek bir eksik bile şüpheli olduğu için, tam tarama yapılmadan
-        dosya "Tam" sayılmaz. Yükseltme bir kez yapılır.
+        'auto_escalate' ayarı kapalıysa (varsayılan) yükseltme yapılmaz: örnek
+        tarama sonucu olduğu gibi raporlanır. Açıksa örnekte tek bir eksik bile
+        şüpheli sayılır ve dosya tam taranır. Yükseltme bir kez yapılır.
 
         Returns:
             True ise aşamalar baştan kuruldu, tarama devam etmeli
         """
-        if self.check_all or state['escalated']:
+        if self.check_all or not self.auto_escalate or state['escalated']:
             return False
         # örnekte hiç eksik yoksa yükseltmeye gerek yok (zaten "Tam")
         if all(mid in state['found'] for mid in state['ids']):

@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, font, messagebox, ttk
+from tkinter import ttk
 
 from nzb_checker.engine import ConfigError, NZBChecker, connect_to_server
 from nzb_checker.engine.checker import iter_nzb_files
@@ -24,10 +24,11 @@ from nzb_checker.updater import UpdateError, check_for_update
 
 from .config import (CONFIG_PATH, DEFAULTS, DEFAULT_PROVIDER, STATUS_TEXT,
                      VISIBLE_WHEN_FILTERED, read_config, write_config)
-from .dialogs import open_provider_dialog, open_update_dialog
+from .dialogs import (ask_yes_no, open_folder_dialog, open_provider_dialog,
+                     open_update_dialog, show_error, show_info)
 from .theme import (ACCENT, ACCENT_DARK, AMBER, BG, BORDER, GREEN, MUTED,
-                    PARTIAL_THRESHOLD, RED, SPEC, STATUS_COLOR, SURFACE, SURFACE_2,
-                    SURFACE_3, TEXT, PATH_FIELDS, CHECK_FIELDS, pick_font)
+                    PARTIAL_THRESHOLD, RED, SPEC, STATUS_COLOR, STRIPE, SURFACE,
+                    SURFACE_2, SURFACE_3, TEXT, PATH_FIELDS, CHECK_FIELDS, pick_font)
 from .widgets import QueueLogHandler, provider_text
 
 # tkdnd Tcl paketi (sürükle-bırak); AppImage'da da yanında taşınır
@@ -37,8 +38,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('NZB Checker')
-        self.geometry('1240x840')
-        self.minsize(1000, 640)
+        self.geometry('1320x900')
+        self.minsize(1040, 700)
         self.configure(bg=BG)
 
         self.ui_font = pick_font('Noto Sans', 'Cantarell', 'Open Sans', 'Liberation Sans')
@@ -65,8 +66,8 @@ class App(tk.Tk):
         self._setup_style()
         self._build_header()
         self._build_cards()
+        self._build_footer()   # önce paketlenir: alt şerit yerini korusun
         self._build_tabs()
-        self._build_footer()
 
         logging.getLogger().addHandler(QueueLogHandler(self.q))
         self.bind('<F5>', lambda _e: self.start())
@@ -131,7 +132,7 @@ class App(tk.Tk):
             self.option_add(option, value)
 
     def _button(self, parent, text, command, primary=False, width=None):
-        return tk.Button(
+        button = tk.Button(
             parent, text=text, command=command,
             bg=ACCENT if primary else SURFACE_3,
             fg='#ffffff' if primary else TEXT,
@@ -142,6 +143,13 @@ class App(tk.Tk):
             padx=14, pady=7, cursor='hand2',
             font=(self.ui_font, 10, 'bold' if primary else 'normal'),
             width=width)
+        # fare üzerine gelince rengi aç (disabled düğmeler karışmasın)
+        idle = button['bg']
+        hover = ACCENT_DARK if primary else SURFACE_2
+        button.bind('<Enter>', lambda _e: button['state'] == 'normal'
+                    and button.config(bg=hover))
+        button.bind('<Leave>', lambda _e: button.config(bg=idle))
+        return button
 
 
 
@@ -178,12 +186,16 @@ class App(tk.Tk):
                                   ('pending', 'Bekleyen', MUTED)):
             card = tk.Frame(row, bg=SURFACE, highlightthickness=1,
                             highlightbackground=BORDER)
-            card.pack(side='left', fill='x', expand=True, padx=(0, 10) if key != 'pending' else 0)
+            card.pack(side='left', fill='x', expand=True,
+                      padx=(0, 10) if key != 'pending' else 0)
+            # üstte ince renk şeridi: karta hangi sayı olduğunu renkle anlatır
+            tk.Frame(card, bg=color, height=2).pack(fill='x')
             value = tk.Label(card, text='0', bg=SURFACE, fg=color,
                              font=(self.ui_font, 22, 'bold'))
-            value.pack(anchor='w', padx=14, pady=(10, 0))
+            value.pack(anchor='w', padx=14, pady=(8, 0))
             tk.Label(card, text=title.upper(), bg=SURFACE, fg=MUTED,
-                     font=(self.ui_font, 8, 'bold')).pack(anchor='w', padx=14, pady=(0, 10))
+                     font=(self.ui_font, 8, 'bold')).pack(anchor='w', padx=14,
+                                                          pady=(0, 10))
             self.card_values[key] = value
 
 
@@ -201,59 +213,91 @@ class App(tk.Tk):
 
 
     def _build_files(self):
-        drop = tk.Frame(self.files_tab, bg=SURFACE_2, padx=16, pady=12,
-                        highlightthickness=2, highlightbackground=BORDER)
+        drop = tk.Frame(self.files_tab, bg=SURFACE_2, padx=18, pady=11,
+                        highlightthickness=1, highlightbackground=BORDER)
         drop.pack(fill='x', padx=12, pady=(12, 0))
         self.drop_zone = drop
+        drop.columnconfigure(1, weight=1)
 
-        self.drop_title = tk.Label(drop, text='NZB klasörünü buraya sürükleyin',
-                                   bg=SURFACE_2, fg=TEXT, font=(self.ui_font, 12, 'bold'))
+        # sol: ikon, sağ: başlık + yol + eylemler (tek blok, hizalı)
+        tk.Label(drop, text='⤓', bg=SURFACE_2, fg=ACCENT,
+                 font=(self.ui_font, 20, 'bold')).grid(row=0, column=0, rowspan=2,
+                                                      padx=(0, 14))
+
+        text_col = tk.Frame(drop, bg=SURFACE_2)
+        text_col.grid(row=0, column=1, sticky='we')
+        self.drop_title = tk.Label(text_col, text='NZB klasörünü buraya sürükleyin',
+                                   bg=SURFACE_2, fg=TEXT,
+                                   font=(self.ui_font, 12, 'bold'))
         self.drop_title.pack(anchor='w')
         self.drop_path = tk.Label(
-            drop, text=self.nzb_folder or 'Henüz klasör seçilmedi (sürükleyin veya seçin)',
-            bg=SURFACE_2, fg=TEXT if self.nzb_folder else MUTED, font=(self.ui_font, 9))
-        self.drop_path.pack(anchor='w', pady=(2, 10))
+            text_col,
+            text=self.nzb_folder or 'Henüz klasör seçilmedi — sürükleyin ya da seçin',
+            bg=SURFACE_2, fg=TEXT if self.nzb_folder else MUTED,
+            font=(self.mono_font, 9))
+        self.drop_path.pack(anchor='w', pady=(3, 0))
 
         row = tk.Frame(drop, bg=SURFACE_2)
-        row.pack(anchor='w')
+        row.grid(row=1, column=2, sticky='e', padx=(14, 0))
         self._button(row, 'Klasör seç', self.choose_folder).pack(side='left')
-        self._button(row, 'Klasörü tara', self.scan_folder).pack(side='left', padx=(8, 0))
+        self._button(row, 'Klasörü tara', self.scan_folder,
+                     primary=True).pack(side='left', padx=(8, 0))
 
-        self._setup_dnd(drop, self.drop_title, self.drop_path, row)
+        self._setup_dnd(drop, self.drop_title, self.drop_path, text_col, row)
 
         bar = tk.Frame(self.files_tab, bg=SURFACE, padx=12, pady=10)
         bar.pack(fill='x')
 
+        # sol: filtreler, sağ: arama + rapor
         self.only_problems = tk.BooleanVar(value=False)
         tk.Checkbutton(bar, text='Sadece eksik/hatalı', variable=self.only_problems,
                        command=self._apply_filter, bg=SURFACE, fg=TEXT,
                        activebackground=SURFACE, activeforeground=TEXT,
                        selectcolor=SURFACE_2, bd=0, highlightthickness=0,
-                       font=(self.ui_font, 10)).pack(side='left', padx=12)
+                       font=(self.ui_font, 10)).pack(side='left')
 
-        tk.Label(bar, text='Ara', bg=SURFACE, fg=MUTED,
-                 font=(self.ui_font, 9)).pack(side='left')
         self.partial_missing = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text='Bazı sağlayıcılarda eksik', variable=self.partial_missing,
+        tk.Checkbutton(bar, text='Bazı sağlayıcılarda eksik',
+                       variable=self.partial_missing,
                        command=self._apply_filter, bg=SURFACE, fg=TEXT,
                        activebackground=SURFACE, activeforeground=TEXT,
                        selectcolor=SURFACE_2, bd=0, highlightthickness=0,
-                       font=(self.ui_font, 9)).pack(side='left', padx=(18, 0))
-
-        self.search = tk.StringVar()
-        entry = tk.Entry(bar, textvariable=self.search, width=22, bg=SURFACE_2, fg=TEXT,
-                         insertbackground=TEXT, relief='flat', highlightthickness=1,
-                         highlightbackground=BORDER, highlightcolor=ACCENT,
-                         font=(self.ui_font, 10))
-        entry.pack(side='left', padx=(6, 0), ipady=4)
-        entry.bind('<KeyRelease>', lambda _e: self._apply_filter())
-
-        self._button(bar, 'Raporu dışa aktar', self.export_report).pack(
-            side='left', padx=(12, 0))
+                       font=(self.ui_font, 10)).pack(side='left', padx=(18, 0))
 
         self.count_label = tk.Label(bar, text='0 dosya', bg=SURFACE, fg=MUTED,
                                     font=(self.ui_font, 9))
-        self.count_label.pack(side='right')
+        self.count_label.pack(side='right', padx=(12, 0))
+
+        self._button(bar, 'Raporu dışa aktar', self.export_report).pack(
+            side='right', padx=(12, 0))
+
+        # arama: yer tutucu metinli, sağda
+        self.search = tk.StringVar()
+        entry = tk.Entry(bar, textvariable=self.search, width=26, bg=SURFACE_2, fg=TEXT,
+                         insertbackground=TEXT, relief='flat', highlightthickness=1,
+                         highlightbackground=BORDER, highlightcolor=ACCENT,
+                         font=(self.ui_font, 10))
+        entry.pack(side='right', ipady=4)
+        entry.bind('<KeyRelease>', lambda _e: self._apply_filter())
+        placeholder = 'Dosya adı ara…'
+        entry.insert(0, placeholder)
+        entry.config(fg=MUTED)
+
+        def focus_in(_event):
+            if self.search.get() == placeholder:
+                entry.delete(0, 'end')
+                entry.config(fg=TEXT)
+
+        def focus_out(_event):
+            if not self.search.get().strip():
+                entry.delete(0, 'end')
+                entry.insert(0, placeholder)
+                entry.config(fg=MUTED)
+
+        entry.bind('<FocusIn>', focus_in)
+        entry.bind('<FocusOut>', focus_out)
+        self._search_entry = entry
+        self._search_placeholder = placeholder
 
         body = tk.Frame(self.files_tab, bg=SURFACE)
         body.pack(fill='both', expand=True, padx=12, pady=(0, 12))
@@ -275,7 +319,7 @@ class App(tk.Tk):
             self.tree.column(column, width=width, anchor=anchor,
                              stretch=(column == 'name'))
 
-        self.tree.tag_configure('odd', background=SURFACE_2)
+        self.tree.tag_configure('odd', background=STRIPE)
         self.tree.tag_configure('even', background=SURFACE)
         for key, color in STATUS_COLOR.items():
             self.tree.tag_configure(key, foreground=color)
@@ -289,12 +333,14 @@ class App(tk.Tk):
     def _build_settings(self):
         wrap = tk.Frame(self.settings_tab, bg=SURFACE, padx=12, pady=12)
         wrap.pack(fill='both', expand=True)
-        for column in range(2):
-            wrap.columnconfigure(column, weight=1, uniform='settings')
+        # sol: sağlayıcılar (geniş), sağ: klasörler + kontrol (üst üste)
+        wrap.columnconfigure(0, weight=3)
+        wrap.columnconfigure(1, weight=2)
+        wrap.rowconfigure(1, weight=1)
 
         self._build_providers(wrap)
-        self._field_group(wrap, 'Klasörler', 1, PATH_FIELDS)
-        self._field_group(wrap, 'Kontrol', 2, CHECK_FIELDS)
+        self._field_group(wrap, 'Klasörler', 1, 0, PATH_FIELDS)
+        self._field_group(wrap, 'Kontrol', 1, 1, CHECK_FIELDS)
 
         footer = tk.Frame(self.settings_tab, bg=SURFACE, padx=12)
         footer.pack(fill='x', pady=(0, 12))
@@ -314,7 +360,7 @@ class App(tk.Tk):
         """Provider listesi + ekle/düzenle/sil/test butonları"""
         group = tk.Frame(parent, bg=SURFACE, highlightthickness=1,
                          highlightbackground=BORDER, padx=14, pady=12)
-        group.grid(row=0, column=0, sticky='nsew', padx=(0, 12))
+        group.grid(row=0, column=0, rowspan=2, sticky='nsew', padx=(0, 12))
         group.columnconfigure(0, weight=1)
 
         head = tk.Frame(group, bg=SURFACE)
@@ -333,7 +379,7 @@ class App(tk.Tk):
             self.provider_tree.heading(column, text=title, anchor=anchor)
             self.provider_tree.column(column, width=width, anchor=anchor,
                                       stretch=(column == 'host'))
-        self.provider_tree.tag_configure('odd', background=SURFACE_2)
+        self.provider_tree.tag_configure('odd', background=STRIPE)
         self.provider_tree.grid(row=1, column=0, sticky='nsew', pady=(10, 8))
         group.rowconfigure(1, weight=1)
         self.provider_tree.bind('<Double-1>', lambda _e: self.edit_provider())
@@ -362,7 +408,7 @@ class App(tk.Tk):
     def _selected_provider(self):
         selection = self.provider_tree.selection()
         if not selection:
-            messagebox.showinfo('Sağlayıcı', 'Önce listeden bir sağlayıcı seçin.')
+            show_info(self, 'Sağlayıcı', 'Önce listeden bir sağlayıcı seçin.')
             return None
         return int(selection[0])
 
@@ -393,10 +439,10 @@ class App(tk.Tk):
             return
         providers = self.config_data['providers']
         if len(providers) <= 1:
-            messagebox.showinfo('Sağlayıcı', 'En az bir sağlayıcı kalmalı.')
+            show_info(self, 'Sağlayıcı', 'En az bir sağlayıcı kalmalı.')
             return
         name = providers[index].get('name') or 'Sağlayıcı'
-        if messagebox.askyesno('Sağlayıcı', f"'{name}' silinsin mi?"):
+        if ask_yes_no(self, 'Sağlayıcı', f"'{name}' silinsin mi?", 'Sil'):
             del providers[index]
             self._refresh_providers()
 
@@ -436,16 +482,19 @@ class App(tk.Tk):
             self._test_provider_async(provider, self.save_hint)
 
 
-    def _field_group(self, parent, title, column, fields):
+    def _field_group(self, parent, title, column, row, fields):
         group = tk.Frame(parent, bg=SURFACE, highlightthickness=1,
                          highlightbackground=BORDER, padx=14, pady=12)
-        group.grid(row=0, column=column, sticky='nsew',
-                   padx=(0, 12) if column < 2 else 0)
-
-        tk.Label(group, text=title, bg=SURFACE, fg=TEXT,
-                 font=(self.ui_font, 11, 'bold')).grid(row=0, column=0, columnspan=3,
-                                                       sticky='w', pady=(0, 10))
+        group.grid(row=row, column=column, sticky='nsew',
+                   pady=(0, 12) if row == 0 else 0)
         group.columnconfigure(1, weight=1)
+
+        head = tk.Frame(group, bg=SURFACE)
+        head.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(0, 10))
+        tk.Label(head, text=title, bg=SURFACE, fg=TEXT,
+                 font=(self.ui_font, 11, 'bold')).pack(side='left')
+        tk.Frame(head, bg=BORDER, height=1).pack(side='left', fill='x',
+                                                 expand=True, padx=(10, 0))
 
         for index, (section, key, label, kind) in enumerate(fields, start=1):
             value = self.config_data.get(section, {}).get(key, DEFAULTS.get(section, {}).get(key))
@@ -469,9 +518,9 @@ class App(tk.Tk):
 
             tk.Label(group, text=label, bg=SURFACE, fg=MUTED,
                      font=(self.ui_font, 9)).grid(row=index, column=0, sticky='w',
-                                                  padx=(0, 10), pady=4)
+                                                  padx=(0, 12), pady=5)
             widget.grid(row=index, column=1, sticky='w' if kind is bool else 'we',
-                        pady=4, ipady=0 if kind is bool else 4)
+                        pady=5, ipady=0 if kind is bool else 4)
 
             if kind == 'dir':
                 self._button(group, '…', lambda v=var: self._pick_dir(v)).grid(
@@ -482,7 +531,7 @@ class App(tk.Tk):
 
     def _build_footer(self):
         footer = tk.Frame(self, bg=BG, padx=14)
-        footer.pack(fill='x', pady=(0, 12))
+        footer.pack(side='bottom', fill='x', pady=(0, 12))
 
         self.progress = ttk.Progressbar(footer, mode='determinate',
                                         style='Accent.Horizontal.TProgressbar')
@@ -495,7 +544,18 @@ class App(tk.Tk):
         log_box = tk.Frame(footer, bg=SURFACE, highlightthickness=1,
                            highlightbackground=BORDER)
         log_box.pack(fill='both', expand=True)
-        self.log_text = tk.Text(log_box, height=6, wrap='none', state='disabled',
+
+        log_head = tk.Frame(log_box, bg=SURFACE, padx=10, pady=6)
+        log_head.pack(fill='x')
+        tk.Label(log_head, text='Günlük', bg=SURFACE, fg=MUTED,
+                 font=(self.ui_font, 9, 'bold')).pack(side='left')
+        tk.Button(log_head, text='Temizle', command=self._clear_log,
+                  bg=SURFACE, fg=MUTED, activebackground=SURFACE_2,
+                  activeforeground=TEXT, relief='flat', bd=0, cursor='hand2',
+                  font=(self.ui_font, 9)).pack(side='right')
+        tk.Frame(log_box, bg=BORDER, height=1).pack(fill='x')
+
+        self.log_text = tk.Text(log_box, height=3, wrap='none', state='disabled',
                                 bg=SURFACE, fg=MUTED, relief='flat', bd=0,
                                 insertbackground=TEXT, padx=10, pady=8,
                                 font=(self.mono_font, 9))
@@ -508,6 +568,12 @@ class App(tk.Tk):
         self.log_text.tag_configure('FATAL', foreground=RED)
 
 
+    def _clear_log(self):
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', 'end')
+        self.log_text.configure(state='disabled')
+
+
     # ------------------------------------------------------------- ayarlar
 
     def _provider_values(self):
@@ -518,7 +584,7 @@ class App(tk.Tk):
         return [dict(provider) for provider in providers]
 
     def _pick_dir(self, var):
-        folder = filedialog.askdirectory(initialdir=var.get() or str(Path.home()))
+        folder = open_folder_dialog(self, var.get() or str(Path.home()))
         if folder:
             var.set(folder)
 
@@ -545,7 +611,7 @@ class App(tk.Tk):
         try:
             self._save_config()
         except Exception as e:
-            messagebox.showerror('Ayarlar', f'Kaydedilemedi: {e}')
+            show_error(self, 'Ayarlar', f'Kaydedilemedi: {e}')
             return
         self.save_hint.config(text=f'Kaydedildi: {CONFIG_PATH}', fg=GREEN)
         self.summary_label.config(text=f'Ayarlar kaydedildi: {CONFIG_PATH}')
@@ -685,6 +751,8 @@ class App(tk.Tk):
         if self.partial_missing.get() and not partial:
             return False
         text = self.search.get().strip().lower()
+        if text == getattr(self, '_search_placeholder', '').lower():
+            text = ''
         return not text or text in name.lower()
 
     def _show(self, name, wanted):
@@ -787,8 +855,8 @@ class App(tk.Tk):
 
     def choose_folder(self):
         """Klasör seç ve tara"""
-        folder = filedialog.askdirectory(initialdir=self.nzb_folder or str(Path.home()),
-                                         title='NZB klasörü seç')
+        folder = open_folder_dialog(self, self.nzb_folder or str(Path.home()),
+                                   'NZB klasörü seç')
         if folder:
             self.set_folder(folder, scan=True)
 
@@ -802,7 +870,7 @@ class App(tk.Tk):
         if path.is_file():
             path = path.parent
         if not path.is_dir():
-            messagebox.showerror('Klasör', f'Klasör bulunamadı: {path}')
+            show_error(self, 'Klasör', f'Klasör bulunamadı: {path}')
             return False
         self.nzb_folder = str(path)
         self.drop_path.config(text=self.nzb_folder, fg=TEXT)
@@ -845,7 +913,7 @@ class App(tk.Tk):
         try:
             self._save_config()
         except Exception as e:
-            messagebox.showerror('Ayarlar', f'Ayarlar kaydedilemedi: {e}')
+            show_error(self, 'Ayarlar', f'Ayarlar kaydedilemedi: {e}')
             return
 
         self._clear_rows()
@@ -862,7 +930,7 @@ class App(tk.Tk):
         try:
             self.checker = NZBChecker(str(CONFIG_PATH), events=self._on_event)
         except ConfigError as exc:
-            messagebox.showerror('Ayarlar', str(exc))
+            show_error(self, 'Ayarlar', str(exc))
             self.start_btn.config(state='normal')
             self.stop_btn.config(state='disabled', fg='#5b6270')
             self.summary_label.config(text='Tarama başlatılamadı')
@@ -881,17 +949,16 @@ class App(tk.Tk):
         """Son taramanın raporunu (CSV + eksik segment listeleri) dışa aktar"""
         checker = self.checker
         if not checker or not getattr(checker, 'results', None):
-            messagebox.showinfo('Rapor', 'Önce bir tarama çalıştırın.')
+            show_info(self, 'Rapor', 'Önce bir tarama çalıştırın.')
             return
-        folder = filedialog.askdirectory(
-            initialdir=self.nzb_folder or str(Path.home()),
-            title='Rapor klasörü seç')
+        folder = open_folder_dialog(self, self.nzb_folder or str(Path.home()),
+                                   'Rapor klasörü seç')
         if not folder:
             return
         try:
             info = checker.export_report(Path(folder))
         except Exception as exc:
-            messagebox.showerror('Rapor', f'Rapor yazılamadı: {exc}')
+            show_error(self, 'Rapor', f'Rapor yazılamadı: {exc}')
             return
         self._log('INFO', f"Rapor yazıldı: {info['csv']} "
                           f"({info['files']} dosya, {info['missing_files']} eksik dosya, "
@@ -993,7 +1060,7 @@ class App(tk.Tk):
                 self._set_status('Hata', RED)
                 self.start_btn.config(state='normal')
                 self.stop_btn.config(state='disabled', fg='#5b6270')
-                messagebox.showerror('Tarama', error)
+                show_error(self, 'Tarama', error)
                 return
             cancelled = data.get('cancelled')
             moved_failed = data.get('move_failed') or 0
@@ -1029,7 +1096,7 @@ class App(tk.Tk):
         elif kind == 'fatal':
             self._log('FATAL', data.get('message', ''))
             self._set_status('Hata', RED)
-            messagebox.showerror('Hata', data.get('message', 'Bilinmeyen hata'))
+            show_error(self, 'Hata', data.get('message', 'Bilinmeyen hata'))
 
         elif kind == 'worker_done':
             self.start_btn.config(state='normal')

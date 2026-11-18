@@ -19,6 +19,7 @@
     },
     "settings": {
         "check_all_articles": false,
+        "auto_escalate": false,
         "sample_check_count": 20,
         "sample_ratio": 0.02,
         "timeout": 30,

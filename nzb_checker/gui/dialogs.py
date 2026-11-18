@@ -1,12 +1,13 @@
-"""Sağlayıcı ekleme/düzenleme penceresi (modal) ve bağlantı testi."""
+"""Sağlayıcı ekleme/düzenleme penceresi (modal), klasör seçici ve bağlantı testi."""
 import logging
 import tkinter as tk
 import webbrowser
+from pathlib import Path
 from tkinter import ttk
 
 from .config import DEFAULT_PROVIDER
-from .theme import (BORDER, MUTED, ACCENT, RED, SURFACE, SURFACE_2, TEXT,
-                    PROVIDER_FIELDS)
+from .theme import (ACCENT, ACCENT_DARK, AMBER, BORDER, MUTED, RED, STRIPE,
+                    SURFACE, SURFACE_2, SURFACE_3, TEXT, PROVIDER_FIELDS)
 from ..updater import pick_asset
 from .widgets import provider_from_vars
 
@@ -88,6 +89,278 @@ class ProviderDialog(tk.Toplevel):
             self.status.config(text=str(exc), fg=RED)
             return
         self.destroy()
+
+
+class FolderDialog(tk.Toplevel):
+    """
+    Koyu temalı klasör seçici.
+
+    filedialog.askdirectory sistem temasını kullanır ve koyu arayüzde
+    yamalı görünür; bu pencere uygulamanın paletiyle çizilir.
+    """
+
+    PLACES = (('Ana dizin', Path.home()),
+              ('İndirilenler', Path.home() / 'İndirilenler'),
+              ('Belgeler', Path.home() / 'Belgeler'),
+              ('Resimler', Path.home() / 'Resimler'),
+              ('Video', Path.home() / 'Videolar'),
+              ('Müzik', Path.home() / 'Müzik'))
+
+    def __init__(self, app, initial='', title='Klasör seç'):
+        super().__init__(app)
+        self.app = app
+        self.result = ''
+        self.current = Path.home()
+        self._entries = []
+        self.title(title)
+        self.configure(bg=SURFACE)
+        self.transient(app)
+        self.geometry('780x520')
+        self.minsize(560, 380)
+
+        body = tk.Frame(self, bg=SURFACE, padx=18, pady=16)
+        body.pack(fill='both', expand=True)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(2, weight=1)
+
+        # --- başlık ---------------------------------------------------
+        head = tk.Frame(body, bg=SURFACE)
+        head.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 12))
+        tk.Label(head, text='▤', bg=SURFACE, fg=ACCENT,
+                 font=(app.ui_font, 16, 'bold')).pack(side='left', padx=(0, 10))
+        text = tk.Frame(head, bg=SURFACE)
+        text.pack(side='left', fill='x', expand=True)
+        tk.Label(text, text=title, bg=SURFACE, fg=TEXT,
+                 font=(app.ui_font, 13, 'bold')).pack(anchor='w')
+        self.where = tk.Label(text, text='', bg=SURFACE, fg=MUTED,
+                              font=(app.ui_font, 9))
+        self.where.pack(anchor='w', pady=(2, 0))
+
+        # --- sol taraf: kısayollar ------------------------------------
+        side = tk.Frame(body, bg=SURFACE_2, padx=10, pady=10)
+        side.grid(row=1, column=0, rowspan=2, sticky='ns', padx=(0, 14))
+        tk.Label(side, text='HIZLI ERİŞİM', bg=SURFACE_2, fg=MUTED,
+                 font=(app.ui_font, 8, 'bold')).pack(anchor='w', pady=(0, 8))
+        self.place_buttons = {}
+        for label, path in self.PLACES:
+            if not path.is_dir():
+                continue
+            button = tk.Button(side, text=label, command=lambda p=path: self._load(p),
+                               bg=SURFACE_2, fg=TEXT, activebackground=SURFACE_3,
+                               activeforeground=TEXT, relief='flat', bd=0, anchor='w',
+                               padx=8, pady=5, cursor='hand2',
+                               font=(app.ui_font, 10))
+            button.pack(fill='x', pady=(0, 2))
+            self.place_buttons[path] = button
+
+        # --- sağ üst: yol çubuğu --------------------------------------
+        bar = tk.Frame(body, bg=SURFACE)
+        bar.grid(row=1, column=1, sticky='ew', pady=(0, 8))
+        app._button(bar, '↑', self._go_up).pack(side='left', padx=(0, 8))
+        self.path_var = tk.StringVar()
+        entry = tk.Entry(bar, textvariable=self.path_var, bg=SURFACE_2, fg=TEXT,
+                         insertbackground=TEXT, relief='flat', highlightthickness=1,
+                         highlightbackground=BORDER, highlightcolor=ACCENT,
+                         font=(app.mono_font, 9))
+        entry.pack(side='left', fill='x', expand=True, ipady=5)
+        entry.bind('<Return>', lambda _e: self._load(self.path_var.get()))
+        self.path_entry = entry
+
+        # --- sağ alt: liste -------------------------------------------
+        list_frame = tk.Frame(body, bg=SURFACE, highlightthickness=1,
+                              highlightbackground=BORDER)
+        list_frame.grid(row=2, column=1, sticky='nsew')
+        self.listbox = tk.Listbox(list_frame, bg=SURFACE, fg=TEXT, relief='flat',
+                                  bd=0, highlightthickness=0, activestyle='none',
+                                  selectbackground=ACCENT_DARK,
+                                  selectforeground='#ffffff',
+                                  exportselection=False, font=(app.ui_font, 10))
+        scroll = ttk.Scrollbar(list_frame, orient='vertical',
+                               command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        self.listbox.pack(side='left', fill='both', expand=True, padx=6, pady=6)
+        self.listbox.bind('<Double-1>', self._enter)
+        self.listbox.bind('<Return>', self._enter)
+        self.listbox.bind('<BackSpace>', lambda _e: self._go_up())
+        self.listbox.bind('<Left>', lambda _e: self._go_up())
+        self.listbox.bind('<space>', lambda _e: self._enter())
+
+        # --- alt: ipucu ve düğmeler ----------------------------------
+        self.hint = tk.Label(body, text='', bg=SURFACE, fg=RED,
+                             font=(app.ui_font, 9), anchor='w')
+        self.hint.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+
+        buttons = tk.Frame(body, bg=SURFACE)
+        buttons.grid(row=4, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+        app._button(buttons, 'Bu klasörü seç', self._select,
+                    primary=True).pack(side='right')
+        app._button(buttons, 'İptal', self.destroy).pack(side='right', padx=(0, 8))
+        self.selected_label = tk.Label(buttons, text='', bg=SURFACE, fg=MUTED,
+                                       font=(app.ui_font, 9))
+        self.selected_label.pack(side='left')
+
+        self._load(initial or str(Path.home()))
+        self.bind('<Escape>', lambda _e: self.destroy())
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f'+{max(x, 0)}+{max(y, 0)}')
+        self.grab_set()
+        self.wait_window()
+
+    def _load(self, path):
+        target = Path(str(path).strip().strip('{}')).expanduser()
+        if not target.is_dir():
+            self.hint.config(text=f'Klasör bulunamadı: {target}')
+            return
+        try:
+            children = sorted(target.iterdir(), key=lambda p: p.name.lower())
+        except OSError as exc:
+            self.hint.config(text=f'Okunamadı: {exc}')
+            return
+
+        folders = [p for p in children if p.is_dir() and not p.name.startswith('.')]
+        files = [p for p in children if p.is_file() and not p.name.startswith('.')]
+
+        self.current = target
+        self.path_var.set(str(target))
+        self.where.config(text=f'{target.name or target}')
+        self.hint.config(text='')
+
+        self.listbox.delete(0, 'end')
+        self._entries = []
+        if target.parent != target:
+            self.listbox.insert('end', '  ↑  üst klasör')
+            self._entries.append((target.parent, 'parent'))
+        for folder in folders:
+            self.listbox.insert('end', f'  ▸  {folder.name}')
+            self._entries.append((folder, 'dir'))
+        for item in files:
+            index = self.listbox.size()
+            self.listbox.insert('end', f'     {item.name}')
+            self.listbox.itemconfig(index, foreground=MUTED)
+            self._entries.append((item, 'file'))
+
+        for index in range(self.listbox.size()):
+            if index % 2:
+                background = STRIPE
+                if self._entries[index][1] != 'file':
+                    self.listbox.itemconfig(index, background=background)
+
+        for path, button in self.place_buttons.items():
+            button.config(fg=ACCENT if path == target else TEXT)
+        self.listbox.selection_clear(0, 'end')
+        self.selected_label.config(
+            text=f'{len(folders)} klasör · {len(files)} dosya')
+
+    def _chosen(self):
+        selection = self.listbox.curselection()
+        if not selection:
+            return None
+        path, kind = self._entries[selection[0]]
+        return (path, kind)
+
+    def _enter(self, _event=None):
+        chosen = self._chosen()
+        if not chosen:
+            return
+        path, kind = chosen
+        if kind == 'file':
+            self.hint.config(text='Dosya değil, bir klasör seçin.')
+            return
+        self._load(path)
+
+    def _go_up(self):
+        self._load(self.current.parent)
+
+    def _select(self):
+        chosen = self._chosen()
+        if chosen and chosen[1] != 'file' and self.listbox.curselection():
+            self.result = str(chosen[0])
+        else:
+            self.result = str(self.current)
+        self.destroy()
+
+
+
+class MessageDialog(tk.Toplevel):
+    """
+    Koyu temalı ileti penceresi.
+
+    messagebox sistem temasını kullanır ve koyu arayüzde yamalı görünür;
+    bu pencere uygulamanın paletiyle çizilir.
+    """
+
+    ICONS = {'info': ('i', ACCENT), 'question': ('?', ACCENT),
+             'warning': ('!', AMBER), 'error': ('!', RED)}
+
+    def __init__(self, app, title, message, kind='info', ask=False,
+                 yes='Evet', no='Vazgeç'):
+        super().__init__(app)
+        self.result = False
+        self.title(title)
+        self.configure(bg=SURFACE)
+        self.transient(app)
+        self.resizable(False, False)
+
+        body = tk.Frame(self, bg=SURFACE, padx=22, pady=18)
+        body.pack(fill='both', expand=True)
+
+        icon, color = self.ICONS.get(kind, self.ICONS['info'])
+        tk.Label(body, text=icon, bg=SURFACE_2, fg=color, width=2,
+                 font=(app.ui_font, 15, 'bold')).grid(row=0, column=0, sticky='n',
+                                                     padx=(0, 14), ipady=8)
+        tk.Label(body, text=title, bg=SURFACE, fg=TEXT,
+                 font=(app.ui_font, 12, 'bold')).grid(row=0, column=1, sticky='w')
+        tk.Label(body, text=message, bg=SURFACE, fg=MUTED, justify='left',
+                 wraplength=400, font=(app.ui_font, 10)).grid(row=1, column=1,
+                                                             sticky='w', pady=(6, 0))
+
+        buttons = tk.Frame(body, bg=SURFACE)
+        buttons.grid(row=2, column=0, columnspan=2, sticky='e', pady=(18, 0))
+        if ask:
+            app._button(buttons, no, self.destroy).pack(side='right', padx=(8, 0))
+            app._button(buttons, yes, self._ok, primary=True).pack(side='right')
+        else:
+            app._button(buttons, 'Tamam', self._ok, primary=True).pack(side='right')
+
+        self.bind('<Return>', lambda _e: self._ok())
+        self.bind('<Escape>', lambda _e: self.destroy())
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f'+{max(x, 0)}+{max(y, 0)}')
+        self.grab_set()
+        self.wait_window()
+
+    def _ok(self):
+        self.result = True
+        self.destroy()
+
+
+def show_info(app, title, message):
+    """messagebox.showinfo yerine koyu temalı pencere"""
+    MessageDialog(app, title, message, 'info')
+
+
+def show_error(app, title, message):
+    """messagebox.showerror yerine koyu temalı pencere"""
+    MessageDialog(app, title, message, 'error')
+
+
+def ask_yes_no(app, title, message, yes='Evet', no='Vazgeç'):
+    """messagebox.askyesno yerine koyu temalı pencere; Evet ise True"""
+    return MessageDialog(app, title, message, 'question', ask=True,
+                         yes=yes, no=no).result
+
+
+def open_folder_dialog(app, initial='', title='Klasör seç'):
+    """Koyu temalı klasör seçiciyi açar; seçilen yol, iptalde boş dize döner."""
+    dialog = FolderDialog(app, initial, title)
+    return dialog.result
 
 
 def open_provider_dialog(app, provider, title):

@@ -7,9 +7,6 @@ from . import __version__
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == '--run':      # AppRun: paketi içe aktarabilmek için yol ekle
-        sys.path.insert(0, '/usr/src')
-        argv.pop(0)
 
     parser = argparse.ArgumentParser(
         prog='nzb-checker',

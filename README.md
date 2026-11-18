@@ -12,7 +12,8 @@ NZB dosyalarını Usenet sunucusunda kontrol eden ve eksik parçalara göre otom
 -  **Sonuç önbelleği (SQLite)**: tekrar taramalarda aynı segment için STAT gönderilmez
 -  **Ön uçuş kontrolü**: başlamadan önce her sağlayıcıya tek bağlantı denenir; erişilemeyen atlanır
 -  **Pipelining**: STAT komutları pencere hâlinde toplu gönderilir (RTT gizlenir, ~10-30× hız)
--  **Akıllı örnekleme**: örnek taramada eksik görülen dosya otomatik tam taramaya yükseltilir
+-  **Akıllı örnekleme (isteğe bağlı)**: `auto_escalate` açıksa örnekte eksik görülen dosya
+   tam taramaya yükseltilir
 -  **Alt klasör tarama**: klasör ağacı taranır, çıktı klasörleri (complete/missing/error) atlanır
 -  **Rapor**: CSV özeti + eksik segment (message-id) listeleri dışa aktarılır
 -  Eksik parçaları tespit etme
@@ -133,6 +134,7 @@ Ayar dosyasının yeri:
     },
     "settings": {
         "check_all_articles": false,      // true: tüm segmentleri kontrol et
+        "auto_escalate": false,           // true: örnekte eksik çıkarsa dosyayı tam tara
         "sample_check_count": 20,         // En az kaç segment kontrol edilsin
         "sample_ratio": 0.02,             // Ayrıca dosyanın bu kadarı kontrol edilir (0.02 = %2)
         "timeout": 30,                    // Bağlantı timeout (saniye)
@@ -246,9 +248,10 @@ python3 tests/test_nzb_checker.py
 5. **Kontrol**: 
    - `check_all_articles=false`: Örnek segmentleri kontrol eder (hızlı).
      Kontrol edilen segment sayısı = `max(sample_check_count, toplam × sample_ratio)`,
-     dosyaya eşit yayılır (ilk ve son segment dahil). Örnekte **en az bir eksik** segment
-     çıkarsa o dosya kalan segmentlerle **tam taramaya yükseltilir** (dosya başına bir kez);
-     hiç eksik görülmezse dosya "Tam" sayılır ve listede `(örnek)` olarak işaretlenir
+     dosyaya eşit yayılır (ilk ve son segment dahil). Listedeki tüm dosyalar `(örnek)`
+     olarak işaretlenir. `auto_escalate: true` ise örnekte **en az bir eksik** segment
+     çıkarsa dosya kalan segmentlerle **tam taranır** (dosya başına bir kez) — daha kesin
+     ama daha yavaş; kapatıkça yalnızca örnek sonucu raporlanır
    - `check_all_articles=true`: Tüm segmentleri kontrol eder (yavaş ama kesin)
 6. **Sınıflandırma**:
    - **complete/**: Eksik segment olmayan dosyalar
