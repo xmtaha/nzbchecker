@@ -45,6 +45,25 @@ Yeniden üretmek için: `./build_appimage.sh` (appimagetool'u gerekirse indirir)
 Sürükle-bırak için `tkdnd/` klasöründeki Tcl paketi kullanılır (tkdnd 2.9.5, Tcl 9 uyumlu).
 Paket repoda hazır durur, ayrıca kurulum gerekmez; ayrıntı için `tkdnd/NOTICE.txt`.
 
+### Gömülü Python'lu sürüm (bundled)
+
+İki AppImage yayınlanır:
+
+| Dosya | Boyut | Python |
+|---|---|---|
+| `NZB-Checker-x86_64.AppImage` | ~1 MB | sistemdeki `python3` + `tkinter` kullanılır |
+| `NZB-Checker-bundled-x86_64.AppImage` | ~11 MB | Python 3.15 ve Tcl/Tk 9.0 **paket içinde** (sistemde python olmasa da çalışır) |
+
+Bundled sürümü üretmek için önce Python/Tcl-Tk ağacını hazırlayın (dağıtımın kendi
+`python3` + `libpython` + `libtcl9/libtcl9tk9` + `tcl9.0/tk9.0` script dizinleri), sonra:
+
+```bash
+./build_appimage.sh NZB-Checker-bundled-x86_64.AppImage /yol/python-agaci
+```
+
+`python-agaci/` düzeni: `python3`, `libpython3.x.so`, `libtcl9*.so`, `lib/tcl9.0`, `lib/tk9.0`.
+`AppRun-bundled` bu düzeni `LD_LIBRARY_PATH`, `TCL_LIBRARY`, `TK_LIBRARY` ile kullanır.
+
 ## Yapılandırma
 
 Ayar dosyasının yeri:

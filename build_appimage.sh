@@ -5,6 +5,8 @@ cd "$(dirname "$0")"
 
 out="$1"
 [ -n "$out" ] || out=NZB-Checker-x86_64.AppImage
+# 2. argüman: gömülü Python/Tk ağacı (verilirse "bundled" sürüm üretilir)
+python_tree="$2"
 
 tool="$APPIMAGETOOL"
 if [ ! -x "$tool" ]; then
@@ -19,7 +21,12 @@ rm -rf "$appdir"
 mkdir -p "$appdir/usr/src"
 cp nzb_gui.py nzb_checker.py nntp_client.py "$appdir/usr/src/"
 cp -r tkdnd "$appdir/usr/src/tkdnd"
-cp AppRun "$appdir/AppRun"
+if [ -n "$python_tree" ]; then
+    cp AppRun-bundled "$appdir/AppRun"
+    cp -a "$python_tree" "$appdir/usr/python"
+else
+    cp AppRun "$appdir/AppRun"
+fi
 cp nzb-checker.desktop "$appdir/nzb-checker.desktop"
 cp nzb-checker.png "$appdir/nzb-checker.png"
 cp nzb-checker.png "$appdir/.DirIcon"
