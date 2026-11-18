@@ -1,7 +1,7 @@
 """GUI yardımcıları: sağlayıcı metni/dönüşümü ve log köprüsü."""
 import logging
 
-from .theme import PROVIDER_FIELDS
+from .theme import PARTIAL_THRESHOLD, PROVIDER_FIELDS
 
 
 def provider_text(providers, detailed=False):
@@ -11,8 +11,9 @@ def provider_text(providers, detailed=False):
         name = p.get('name') or '?'
         percent = p.get('percent') or 0.0
         if not detailed:
-            parts.append(f"{name} {'✓' if percent < 0.05 else f'%{percent:.1f}'}")
-        elif percent < 0.05:
+            parts.append(f"{name} "
+                         f"{'✓' if percent < PARTIAL_THRESHOLD else f'%{percent:.1f}'}")
+        elif percent < PARTIAL_THRESHOLD:
             parts.append(f"{name}: tam")
         else:
             parts.append(f"{name}: %{percent:.1f} eksik ({p.get('missing', 0)} segment)")

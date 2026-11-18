@@ -17,11 +17,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nzb_checker.engine import NZBChecker  # noqa: E402
+from nzb_checker.engine.cache import ResultCache  # noqa: E402
 
 EXIST = {f'ok-complete-{i}@test' for i in range(20)} | {f'ok-upper-{i}@test' for i in range(6)}
 EXIST |= {'ok-m1@test', 'ok-m2@test', 'ok-m4@test', 'drop-1@test', 'ok-d2@test'}
 BIG = {f'ok-big-{i}@test' for i in range(300) if i % 6 != 0}  # 50 tanesi yok
 EXIST |= BIG
+# yukseltme testi: 100 segment, 4'u yok; yalnizca index 0 ornege denk gelir
+ESC_IDS = [f'ok-esc-{i}@test' for i in range(100)]
+EXIST |= {mid for i, mid in enumerate(ESC_IDS) if i not in (0, 30, 60, 90)}
 
 # port -> sunucudaki makale kumesi (coklu provider testi farkli portlar kullanir)
 EXIST_BY_PORT = {}
@@ -100,6 +104,9 @@ def write_config(tmp, nzb_dir, port, providers=None, **settings):
                      'cache': False},
     }
     config['settings'].update(settings)
+    # saglayici sirasi gecmise bagli: testler arasi sizmasi engelle
+    history = Path(os.environ['XDG_CACHE_HOME']) / 'nzb_checker' / 'last_scan.json'
+    history.unlink(missing_ok=True)
     path = Path(tmp) / f'config_{len(list(Path(tmp).glob("config_*")))}.json'
     path.write_text(json.dumps(config), encoding='utf-8')
     return path
@@ -150,6 +157,98 @@ def test_paralel_tam_tarama(tmp, port, capture):
     assert SEEN['stat'] == 300, f'beklenen 300 STAT, gelen {SEEN["stat"]}'
     assert SEEN['max_conns'] >= 2, f'tek dosya tek baglantida tarandi (max {SEEN["max_conns"]})'
     assert any('50/300' in m for m in capture.messages), capture.messages[-5:]
+
+
+def test_yukseltme(tmp, port, capture):
+    """Ornekte eksik gorulurse dosya tam taramaya yukseltilir (kesin sayim)"""
+    nzb_dir = Path(tmp) / 'escalate'
+    nzb_dir.mkdir()
+    (nzb_dir / 'esc.nzb').write_text(nzb(ESC_IDS), encoding='utf-8')
+
+    SEEN['stat'] = 0
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port)))
+    checker.process_nzb_files()
+
+    assert placed_in(nzb_dir)['missing'] == ['esc.nzb'], placed_in(nzb_dir)
+    item = checker.results[0]
+    assert item['checked_all'] is True, item
+    assert item['checked'] == 100 and item['missing'] == 4, item
+    assert item['percent'] == 4.0, item
+    assert len(item['missing_ids']) == 4, item['missing_ids']
+    # 20 ornek + yukseltmede kalan 81 (bulunanlar tekrar sorulmaz)
+    assert SEEN['stat'] == 101, f'beklenen 101 STAT, gelen {SEEN["stat"]}'
+    assert any('tam taramaya' in m for m in capture.messages), capture.messages[-5:]
+
+
+def test_ornek_rozeti(tmp, port, capture):
+    """Ornekte eksik yoksa tam tarama yapilmaz, satir 'ornek' olarak isaretlenir"""
+    nzb_dir = Path(tmp) / 'sample'
+    nzb_dir.mkdir()
+    ids = [f'ok-esc-{i}@test' for i in range(100) if i not in (0, 30, 60, 90)]
+    (nzb_dir / 'sample.nzb').write_text(nzb(ids), encoding='utf-8')
+
+    SEEN['stat'] = 0
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port)))
+    checker.process_nzb_files()
+
+    assert placed_in(nzb_dir)['complete'] == ['sample.nzb'], placed_in(nzb_dir)
+    assert checker.results[0]['checked_all'] is False, checker.results[0]
+    assert SEEN['stat'] == 20, f'ornek 20 STAT olmali, gelen {SEEN["stat"]}'
+
+
+def test_alt_klasor(tmp, port, capture):
+    """Alt klasorler taranir; complete/missing/error klasorleri tekrar taranmaz"""
+    nzb_dir = Path(tmp) / 'nested'
+    (nzb_dir / 'alt' / 'derin').mkdir(parents=True)
+    (nzb_dir / 'alt' / 'derin' / 'ic.nzb').write_text(nzb(['ok-m1@test']), encoding='utf-8')
+
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port)))
+    checker.process_nzb_files()
+
+    assert checker.results[0]['name'] == 'alt/derin/ic.nzb', checker.results
+    assert placed_in(nzb_dir)['complete'] == ['ic.nzb'], placed_in(nzb_dir)
+
+    # ikinci tarama: tasinmis dosya cikti klasorunden geri alinmamali
+    again = NZBChecker(str(write_config(tmp, nzb_dir, port)))
+    again.process_nzb_files()
+    assert again.results == [] and again.stats['total'] == 0, again.results
+
+
+def test_saglayici_sirasi(tmp, port2, port, capture):
+    """Gecmis isabet oranina gore yuksek olan saglayici basa alinir"""
+    nzb_dir = Path(tmp) / 'order'
+    nzb_dir.mkdir()
+    providers = [
+        {'name': 'P2', 'host': '127.0.0.1', 'port': port2, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 2},
+        {'name': 'P1', 'host': '127.0.0.1', 'port': port, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 2},
+    ]
+    config = write_config(tmp, nzb_dir, port, providers=providers, cache=False)
+    history = Path(os.environ['XDG_CACHE_HOME']) / 'nzb_checker' / 'last_scan.json'
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_text(json.dumps({'providers': {
+        'P1': {'stat': 100, 'missing': 0},
+        'P2': {'stat': 100, 'missing': 40},
+    }}), encoding='utf-8')
+
+    checker = NZBChecker(str(config))
+    assert [p['name'] for p in checker.providers] == ['P1', 'P2'], checker.providers
+    history.unlink()
+
+
+def test_onbellek_ttl(tmp, port, capture):
+    """Var sonucu kisa, yok sonucu uzun TTL ile saklanir"""
+    cache = ResultCache(Path(tmp) / 'ttl.db', ttl_days=14)
+    key = 'test-key'
+    cache.put_many(key, {'var@test': True, 'yok@test': False})
+    assert cache.get_many(key, ['var@test', 'yok@test']) == {
+        'var@test': True, 'yok@test': False}
+
+    # "var" kaydinin tazelik penceresini gecmis say, "yok" hala taze kalmali
+    cache.present_ttl_seconds = -1
+    assert cache.get_many(key, ['var@test', 'yok@test']) == {'yok@test': False}
+    cache.close()
 
 
 def test_tam_dosya(tmp, port, capture):
@@ -258,7 +357,10 @@ def test_saglayici_hatasi(tmp, port, capture):
     placed = placed_in(nzb_dir)
     assert placed['complete'] == ['fallback.nzb'], placed
     assert checker.stats == {'total': 1, 'complete': 1, 'missing': 0, 'error': 0}, checker.stats
-    assert checker._provider_ok == [False, True], checker._provider_ok
+    # sağlayıcılar geçmiş isabet oranına göre sıralanabilir: ada göre karşılaştır
+    assert dict(zip((p['name'] for p in checker.providers),
+                    checker._provider_ok)) == {'Olu': False, 'P1': True}, \
+        list(zip((p['name'] for p in checker.providers), checker._provider_ok))
 
 
 def test_kademeli_provider(tmp, port2, port, capture):
@@ -475,16 +577,21 @@ def main():
     logging.getLogger().addHandler(capture)
 
     with tempfile.TemporaryDirectory() as tmp:
-        os.chdir(tmp)  # log dosyasi cwd'ye yazilir
+        os.chdir(tmp)
+        # log/onbellek/gecmis gercek ~/.cache'e yazilmasin
+        os.environ['XDG_CACHE_HOME'] = str(Path(tmp) / 'xdg-cache')
         test_siniflandirma(tmp, port, capture)
         test_paralel_tam_tarama(tmp, port, capture)
         test_tam_dosya(tmp, port, capture)
+        test_alt_klasor(tmp, port, capture)
+        test_onbellek_ttl(tmp, port, capture)
         test_olaylar(tmp, port, capture)
         test_iptal(tmp, port, capture)
         test_tasima_cakismasi(tmp, port, capture)
         test_saglayici_hatasi(tmp, port, capture)
         test_onbellek(tmp, port, capture)
         test_coklu_provider(tmp, port2, port, capture)
+        test_saglayici_sirasi(tmp, port2, port, capture)
         test_kademeli_provider(tmp, port2, port, capture)
         test_guncelleme(tmp, capture)
         test_config_hatasi(tmp, capture)

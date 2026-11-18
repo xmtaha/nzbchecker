@@ -17,6 +17,9 @@ GREY = '#7c8697'
 STATUS_COLOR = {'complete': GREEN, 'missing': AMBER, 'error': RED,
                 'cancelled': GREY, 'running': ACCENT, 'queued': MUTED}
 
+# yuvarlama gürültüsü: bu eşiğin altındaki eksik yüzdesi "tam" sayılır
+PARTIAL_THRESHOLD = 0.05
+
 # provider düzenleyicisi: (anahtar, etiket, tip)
 PROVIDER_FIELDS = [
     ('name', 'Ad', str),

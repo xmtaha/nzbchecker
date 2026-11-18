@@ -18,15 +18,16 @@ import tkinter as tk
 from tkinter import filedialog, font, messagebox, ttk
 
 from nzb_checker.engine import ConfigError, NZBChecker, connect_to_server
+from nzb_checker.engine.checker import iter_nzb_files
 from nzb_checker import __version__
 from nzb_checker.updater import UpdateError, check_for_update
 
 from .config import (CONFIG_PATH, DEFAULTS, DEFAULT_PROVIDER, STATUS_TEXT,
                      VISIBLE_WHEN_FILTERED, read_config, write_config)
 from .dialogs import open_provider_dialog, open_update_dialog
-from .theme import (ACCENT, ACCENT_DARK, AMBER, BG, BORDER, GREEN, MUTED, RED,
-                    SPEC, STATUS_COLOR, SURFACE, SURFACE_2, SURFACE_3, TEXT,
-                    PATH_FIELDS, CHECK_FIELDS, pick_font)
+from .theme import (ACCENT, ACCENT_DARK, AMBER, BG, BORDER, GREEN, MUTED,
+                    PARTIAL_THRESHOLD, RED, SPEC, STATUS_COLOR, SURFACE, SURFACE_2,
+                    SURFACE_3, TEXT, PATH_FIELDS, CHECK_FIELDS, pick_font)
 from .widgets import QueueLogHandler, provider_text
 
 # tkdnd Tcl paketi (sürükle-bırak); AppImage'da da yanında taşınır
@@ -47,6 +48,9 @@ class App(tk.Tk):
         self.q = queue.Queue()
         self.rows = {}          # dosya adı -> {'iid':..., 'status':..., 'visible':...}
         self.order = []         # eklenme sırası
+        self._sort_column = None  # başlığa tıklanınca sıralama sütunu
+        self._sort_desc = False
+        self._sort_pending = False
         self.counts = {'complete': 0, 'missing': 0, 'error': 0}
         self.listed = 0
         self.checker = None
@@ -266,7 +270,8 @@ class App(tk.Tk):
                 ('percent', 'Eksik %', 90, 'e'),
                 ('providers', 'Sağlayıcılar', 300, 'w'),
                 ('elapsed', 'Süre', 90, 'e')):
-            self.tree.heading(column, text=title, anchor=anchor)
+            self.tree.heading(column, text=title, anchor=anchor,
+                              command=lambda c=column: self._sort_by(c))
             self.tree.column(column, width=width, anchor=anchor,
                              stretch=(column == 'name'))
 
@@ -644,18 +649,23 @@ class App(tk.Tk):
             iid = self.tree.insert('', 'end', tags=(stripe, status))
             entry = {'iid': iid, 'status': status, 'visible': True, 'stripe': stripe,
                      'segments': 0, 'checked': 0, 'missing': 0, 'percent': None,
-                     'providers': [], 'elapsed': 0.0}
+                     'providers': [], 'elapsed': 0.0, 'checked_all': True}
             self.rows[name] = entry
             self.order.append(name)
 
         entry['status'] = status
         if 'providers' in fields:
             entry['providers'] = fields['providers'] or []
+        if fields.get('checked_all') is not None:
+            entry['checked_all'] = bool(fields['checked_all'])
         for key in ('segments', 'checked', 'missing', 'percent', 'elapsed'):
             if key in fields and fields[key] is not None:
                 entry[key] = fields[key]
 
-        values = (name, STATUS_TEXT.get(status, status), entry['segments'],
+        label = STATUS_TEXT.get(status, status)
+        if status == 'complete' and not entry['checked_all']:
+            label += ' (örnek)'
+        values = (name, label, entry['segments'],
                   entry['checked'], entry['missing'],
                   f"%{entry['percent']:.1f}" if entry['percent'] else '',
                   provider_text(entry['providers']),
@@ -667,7 +677,8 @@ class App(tk.Tk):
         entry = self.rows[name]
         providers = entry.get('providers') or []
         partial = (entry['status'] == 'complete'
-                   and any((p.get('percent') or 0) >= 0.05 for p in providers))
+                   and any((p.get('percent') or 0) >= PARTIAL_THRESHOLD
+                           for p in providers))
         entry['partial'] = partial
         if self.only_problems.get() and entry['status'] not in VISIBLE_WHEN_FILTERED:
             return False
@@ -683,13 +694,49 @@ class App(tk.Tk):
             return
         if wanted:
             self.tree.move(entry['iid'], '', 'end')
+            # sıralama açıksa satırlar eklenirken sıra bozulur; topluca düzelt
+            if self._sort_column and not self._sort_pending:
+                self._sort_pending = True
+                self.after(200, self._sort_tick)
         else:
             self.tree.detach(entry['iid'])
         entry['visible'] = wanted
 
+    def _sort_tick(self):
+        self._sort_pending = False
+        self._apply_sort()
+
+    def _sort_by(self, column):
+        """Başlığa tıklayınca sırala; aynı sütunda ikinci tıklama yönü çevirir"""
+        descending = self._sort_column == column and not self._sort_desc
+        self._sort_column, self._sort_desc = column, descending
+        self._apply_sort()
+
+    def _apply_sort(self):
+        """Görünen satırları seçili sütuna göre yeniden dizer"""
+        column = self._sort_column
+        if not column:
+            return
+        if column == 'name':
+            key = lambda name: name.lower()
+        elif column == 'providers':
+            key = lambda name: len(self.rows[name].get('providers') or [])
+        elif column == 'status':
+            key = lambda name: STATUS_TEXT.get(self.rows[name]['status'],
+                                               self.rows[name]['status'])
+        else:
+            key = lambda name: self.rows[name].get(column) or 0
+
+        # yalnızca görünen satırları taşı; filtreden gizlenenler detached kalır
+        for name in sorted(self.order, key=key, reverse=self._sort_desc):
+            entry = self.rows[name]
+            if entry['visible']:
+                self.tree.move(entry['iid'], '', 'end')
+
     def _apply_filter(self):
         for name in self.order:
             self._show(name, self._row_wanted(name))
+        self._apply_sort()
 
     def _refresh_counts(self):
         done = self.counts['complete'] + self.counts['missing'] + self.counts['error']
@@ -769,8 +816,14 @@ class App(tk.Tk):
             self.choose_folder()
             return
 
-        files = sorted(p.name for p in folder.iterdir()
-                       if p.is_file() and p.suffix.lower() == '.nzb')
+        paths = self.config_data.get('paths', {})
+        skip = [folder / paths[key] for key in
+                ('complete_folder', 'missing_folder', 'error_folder')
+                if paths.get(key)]
+        root = folder.resolve()
+        files = sorted(
+            str(p.name if p.parent.resolve() == root else p.relative_to(folder))
+            for p in iter_nzb_files(folder, skip))
         self._clear_rows()
 
         def fill(index=0):
@@ -912,7 +965,8 @@ class App(tk.Tk):
                          checked=data.get('checked', 0), missing=data.get('missing', 0),
                          elapsed=data.get('elapsed', 0.0),
                          percent=data.get('percent') or None,
-                         providers=providers)
+                         providers=providers,
+                         checked_all=data.get('checked_all'))
             if data.get('moved') is False and status != 'cancelled':
                 self._log('WARNING', f"{data['name']}: taşınamadı, yerinde bırakıldı")
             if len(providers) > 1:

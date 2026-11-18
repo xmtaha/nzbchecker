@@ -11,7 +11,7 @@ cagiran taraf bunu gormez.
 
 import socket
 import ssl
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 # Yeniden baglanip tekrar denemeye deger yanit kodlari:
 # 400-403 sunucu kapaniyor / gecici red, 480-482 kimlik veya zaman asimi,
@@ -181,6 +181,56 @@ class NNTPClient:
             raise NNTPConnectionError(
                 f"STAT {message_id} basarisiz: yeniden baglandiktan sonra da "
                 f"baglanti koptu: {second}") from second
+
+    def stat_many(self, message_ids: Sequence[str]) -> List[bool]:
+        """
+        Bir grup article icin STAT komutlarini boru hattina dizip tek turda okur.
+
+        Komutlar arka arkaya gonderilir, yanitlar sirayla okunur; boylece
+        segment basina ayri gidis-donus (RTT) yasanmaz. Pencere basina gecici
+        hatada bir kez yeniden baglanilir; ikinci hatada NNTPConnectionError.
+
+        Returns:
+            message_ids ile ayni sirada True (var) / False (yok) listesi
+
+        Raises:
+            NNTPConnectionError: yeniden baglandiktan sonra da baglanti koptu
+            NNTPError: baska bir NNTP hatasi (bu durumda baglanti cop olabilir)
+        """
+        ids = [mid if mid.startswith('<') else f'<{mid}>' for mid in message_ids]
+        if not ids:
+            return []
+
+        try:
+            return self._stat_many_once(ids)
+        except _Transient as first:
+            self._reconnect_for_retry(ids[0], first)
+
+        try:
+            return self._stat_many_once(ids)
+        except _Transient as second:
+            raise NNTPConnectionError(
+                f"STAT x{len(ids)} basarisiz: yeniden baglandiktan sonra da "
+                f"baglanti koptu: {second}") from second
+
+    def _stat_many_once(self, ids: List[str]) -> List[bool]:
+        """Tek denemelik toplu STAT - gecici hatalari _Transient firlatir"""
+        for message_id in ids:
+            self._putline(f'STAT {message_id}')
+
+        out: List[bool] = []
+        for _ in ids:
+            line = self._getline()
+            code = line[:3]
+            if code == b'223':
+                out.append(True)
+            elif code in (b'430', b'423'):
+                out.append(False)
+            elif code in TRANSIENT_CODES:
+                raise _Transient(f"gecici sunucu yaniti: {_text(line)}")
+            else:
+                raise NNTPError(f"STAT hatasi: {_text(line)}")
+        return out
 
     def _stat_once(self, message_id: str) -> Tuple[str, str]:
         """Tek denemelik STAT - gecici hatalari _Transient olarak firlatir"""

@@ -9,6 +9,7 @@ açılamazsa önbellek sessizce devre dışı kalır - tarama normal sürer.
 """
 
 import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -18,10 +19,20 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 DEFAULT_TTL_DAYS = 14
+
+# "Var" sonucu kısa süre güvenilir: DMCA/retention silmeleri olabilir.
+# "Yok" sonucu uzun süre saklanır (silinen segment geri gelmez).
+PRESENT_TTL_DAYS = 2
 logger = logging.getLogger(__name__)
 
 # SQLite eski sürümlerinde değişken sınırı 999; IN (...) sorgularını böl
 _QUERY_BATCH = 400
+
+
+def default_state_dir() -> Path:
+    """Kalıcı durum dizini: $XDG_CACHE_HOME/nzb_checker (önbellek, log, son tarama)"""
+    base = os.environ.get('XDG_CACHE_HOME') or (Path.home() / '.cache')
+    return Path(base) / 'nzb_checker'
 
 
 def default_cache_path() -> Path:
@@ -29,8 +40,30 @@ def default_cache_path() -> Path:
     override = os.environ.get('NZB_CHECKER_CACHE')
     if override:
         return Path(override).expanduser()
-    base = os.environ.get('XDG_CACHE_HOME') or (Path.home() / '.cache')
-    return Path(base) / 'nzb_checker' / 'cache.db'
+    return default_state_dir() / 'cache.db'
+
+
+def default_history_path() -> Path:
+    """Son taramanın özeti (sağlayıcı sıralaması ve GUI açılışı için)"""
+    return default_state_dir() / 'last_scan.json'
+
+
+def load_scan_history() -> Dict:
+    """Son taramanın özeti; yoksa/bozuksa boş sözlük"""
+    try:
+        return json.loads(default_history_path().read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_scan_history(payload: Dict) -> None:
+    """Son tarama özetini yaz (yazılamazsa sessizce geç)"""
+    path = default_history_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+    except OSError as exc:
+        logger.debug(f"Tarama geçmişi yazılamadı: {exc}")
 
 
 def provider_key(provider: dict) -> str:
@@ -49,6 +82,8 @@ class ResultCache:
     def __init__(self, path=None, ttl_days: int = DEFAULT_TTL_DAYS):
         self.path = Path(path).expanduser() if path else default_cache_path()
         self.ttl_seconds = max(1, int(ttl_days)) * 86400
+        present_days = min(PRESENT_TTL_DAYS, max(1, int(ttl_days)))
+        self.present_ttl_seconds = present_days * 86400
         self._lock = threading.Lock()
         self.conn: Optional[sqlite3.Connection] = None
         try:
@@ -79,7 +114,9 @@ class ResultCache:
         ids = list(message_ids)
         if self.conn is None or not ids:
             return {}
-        cutoff = time.time() - self.ttl_seconds
+        now = time.time()
+        present_cutoff = now - self.present_ttl_seconds
+        missing_cutoff = now - self.ttl_seconds
         found: Dict[str, bool] = {}
         with self._lock:
             try:
@@ -88,9 +125,10 @@ class ResultCache:
                     marks = ','.join('?' * len(part))
                     rows = self.conn.execute(
                         f'SELECT message_id, present FROM results '
-                        f'WHERE provider = ? AND checked_at >= ? '
-                        f'AND message_id IN ({marks})',
-                        [key, cutoff, *part])
+                        f'WHERE provider = ? AND message_id IN ({marks}) '
+                        f'AND ((present = 1 AND checked_at >= ?) '
+                        f'     OR (present = 0 AND checked_at >= ?))',
+                        [key, *part, present_cutoff, missing_cutoff])
                     found.update({mid: bool(present) for mid, present in rows})
             except Exception as exc:
                 logger.debug(f"Önbellek okunamadı: {exc}")

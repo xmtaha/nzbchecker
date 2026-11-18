@@ -9,23 +9,52 @@ import json
 import logging
 import math
 import shutil
+import sys
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from threading import Event, Lock, Semaphore, local
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
-try:
-    from nntplib import NNTP, NNTP_SSL
-except ModuleNotFoundError:  # Python 3.13+ nntplib icermez
-    from .nntp_client import NNTP, NNTP_SSL
-from .cache import ResultCache, provider_key
-from .nntp_client import ArticleNotFound
+from .cache import (ResultCache, default_state_dir, load_scan_history,
+                    provider_key, save_scan_history)
+from .nntp_client import NNTP, NNTP_SSL
+
+
+# Boru hattı penceresi: tek seferde gönderilen STAT sayısı. Sunucular
+# sınırsız komut kuyruğuna izin vermez; 32 güvenli ve RTT'yi ~32 kat gizler.
+PIPELINE_WINDOW = 32
 
 
 class ConfigError(Exception):
     """Ayar dosyası okunamadı veya kullanılabilir sağlayıcı yok"""
+
+
+def output_folders(paths: dict) -> Dict[str, Path]:
+    """Yapılandırmadaki çıktı klasörlerini (complete/missing/error) çözer"""
+    base = Path(paths['nzb_folder'])
+    return {key: base / paths[key]
+            for key in ('complete', 'missing', 'error')
+            if paths.get(f'{key}_folder')}
+
+
+def iter_nzb_files(nzb_folder: Path, exclude: Iterable[Path] = ()) -> List[Path]:
+    """
+    NZB dosyalarını alt klasörler dahil listeler.
+
+    Çıktı klasörleri (complete/missing/error) nzb_folder içinde olduğu için
+    atlanır; yoksa taşınmış dosyalar bir sonraki taramada yeniden taranır.
+    """
+    skip = {Path(p).resolve() for p in exclude}
+    found = []
+    for path in sorted(Path(nzb_folder).rglob('*')):
+        if not path.is_file() or path.suffix.lower() != '.nzb':
+            continue
+        if any(parent.resolve() in skip for parent in path.parents):
+            continue
+        found.append(path)
+    return found
 
 
 def connect_to_server(provider: dict, timeout: float = 30) -> Union[NNTP_SSL, NNTP]:
@@ -59,7 +88,8 @@ class NZBChecker:
             'error': 0
         }
         self.stats_lock = Lock()
-        self.providers = self.load_providers()
+        self.scan_history = load_scan_history()
+        self.providers = self._order_providers(self.load_providers())
         if not self.providers:
             raise ConfigError(
                 'Kullanılabilir sağlayıcı yok: en az bir sağlayıcı için sunucu adresi girin')
@@ -91,7 +121,8 @@ class NZBChecker:
 
         # sağlayıcı bazlı metrikler (kademeli tarama etkisini ölçmek için)
         self.provider_metrics = [
-            {'name': p['name'], 'stat': 0, 'cache': 0, 'errors': 0, 'active': True}
+            {'name': p['name'], 'stat': 0, 'cache': 0, 'errors': 0,
+             'missing': 0, 'active': True}
             for p in self.providers
         ]
         self._scan_started = None
@@ -99,6 +130,33 @@ class NZBChecker:
 
         self.events = events or (lambda kind, **data: None)
         self.cancel_event = Event()
+
+    def _order_providers(self, providers: List[Dict]) -> List[Dict]:
+        """
+        Sağlayıcıları geçmiş başarı oranına göre sıralar.
+
+        Kademeli taramada ilk sağlayıcı tüm segmentleri, sonrakiler yalnızca
+        bulunamayanları kontrol eder; en yüksek isabetli sağlayıcıyı başa almak
+        toplam STAT sayısını düşürür. Geçmişi olmayanlar 0.5 (nötr) sayılır.
+        """
+        if len(providers) < 2:
+            return providers
+        stats = (self.scan_history or {}).get('providers') or {}
+        if not isinstance(stats, dict):
+            return providers
+
+        def rate(index: int, provider: Dict) -> float:
+            item = stats.get(provider.get('name')) or {}
+            try:
+                asked = int(item.get('stat') or 0)
+                missing = int(item.get('missing') or 0)
+            except (TypeError, ValueError):
+                return 0.5
+            return (asked - missing) / asked if asked else 0.5
+
+        order = sorted(range(len(providers)),
+                       key=lambda i: rate(i, providers[i]), reverse=True)  # stabil
+        return [providers[i] for i in order]
 
     def load_providers(self) -> List[Dict]:
         """
@@ -144,13 +202,21 @@ class NZBChecker:
         log_level = getattr(logging, self.config.get('settings', {}).get('log_level', 'INFO'), logging.INFO)
         root = logging.getLogger()
         if not root.handlers:  # GUI tekrar çalıştırınca handler'ları çoğaltma
+            handlers = [logging.StreamHandler()]
+            # log'u çalışma dizinine değil kullanıcı cache dizinine yaz:
+            # AppImage salt-okunur yerden açıldığında da yazılabilir olur
+            try:
+                log_dir = default_state_dir()
+                log_dir.mkdir(parents=True, exist_ok=True)
+                handlers.insert(0, logging.FileHandler(
+                    log_dir / 'nzb_checker.log', encoding='utf-8'))
+            except OSError as e:
+                print(f"Log dosyası açılamadı, yalnızca konsola yazılacak: {e}",
+                      file=sys.stderr)
             logging.basicConfig(
                 level=log_level,
                 format='%(asctime)s - %(levelname)s - %(message)s',
-                handlers=[
-                    logging.FileHandler('nzb_checker.log', encoding='utf-8'),
-                    logging.StreamHandler()
-                ]
+                handlers=handlers
             )
         root.setLevel(log_level)
         self.logger = logging.getLogger(__name__)
@@ -279,27 +345,6 @@ class NZBChecker:
             indexes = [total - 1]
         return [segments[i] for i in indexes]
 
-    def check_article_exists(self, server: Union[NNTP_SSL, NNTP], message_id: str) -> bool:
-        """
-        Bir article'ın sunucuda olup olmadığını kontrol eder
-
-        Returns:
-            Article varsa True, yoksa False
-
-        Raises:
-            NNTPConnectionError/NNTPError: kontrol yapılamadıysa (article yokluğu değil)
-        """
-        try:
-            server.stat(f'<{message_id}>')
-            return True
-        except ArticleNotFound:
-            return False
-        except Exception as e:
-            # nntplib yolu 430/423 için NNTPError fırlatır
-            if any(code in str(e) for code in ('430', '423')):
-                return False
-            raise
-
     def _check_chunk(self, index: int, message_ids: List[str]) -> Tuple[Set[str], Set[str]]:
         """
         Bir segment dilimini tek provider üzerinde kontrol eder.
@@ -319,23 +364,28 @@ class NZBChecker:
         with self._slots[index]:
             try:
                 cached = cache.get_many(key, message_ids) if cache is not None else {}
-                cache_hits = sum(1 for mid in message_ids if mid in cached)
-                conn = None
+                cache_hits = 0
                 for message_id in message_ids:
+                    if message_id not in cached:
+                        continue
+                    cache_hits += 1
+                    checked.add(message_id)
+                    if not cached[message_id]:
+                        missing.add(message_id)
+
+                conn = None
+                to_ask = [mid for mid in message_ids if mid not in cached]
+                for start in range(0, len(to_ask), PIPELINE_WINDOW):
                     if self.cancel_event.is_set():
                         break
-                    if message_id in cached:
-                        checked.add(message_id)
-                        if not cached[message_id]:
-                            missing.add(message_id)
-                        continue
+                    window = to_ask[start:start + PIPELINE_WINDOW]
                     if conn is None:
                         conn = self._connection(index)
-                    checked.add(message_id)
-                    exists = self.check_article_exists(conn, message_id)
-                    updates[message_id] = exists
-                    if not exists:
-                        missing.add(message_id)
+                    for message_id, exists in zip(window, conn.stat_many(window)):
+                        checked.add(message_id)
+                        updates[message_id] = exists
+                        if not exists:
+                            missing.add(message_id)
                 if cache_hits or updates:
                     with self.stats_lock:
                         self.provider_metrics[index]['cache'] += cache_hits
@@ -371,31 +421,40 @@ class NZBChecker:
             self.logger.error(f"Dosya taşıma hatası ({nzb_path}): {e}")
             return False
 
+    def _display_name(self, nzb_path: Path) -> str:
+        """Alt klasördeki dosyaları ayırt etmek için göreli yol (üst düzeyde ad)"""
+        try:
+            return str(nzb_path.relative_to(Path(self.config['paths']['nzb_folder'])))
+        except ValueError:
+            return nzb_path.name
+
     def _classify(self, nzb_path: Path, status: str, total_segments: int = 0,
                   missing: int = 0, checked: int = 0, started: Optional[float] = None,
                   percent: float = 0.0, per_provider: Optional[List[Dict]] = None,
-                  missing_ids: Optional[List[str]] = None):
+                  missing_ids: Optional[List[str]] = None,
+                  checked_all: Optional[bool] = None):
         """Dosyayı ilgili klasöre taşır, sayacı artırır ve rapor satırını saklar"""
+        name = self._display_name(nzb_path)
         detail = ''
         if per_provider and len(per_provider) > 1:
             detail = ' [' + ', '.join(
                 f"{p['name']}: %{p['percent']:.1f}" for p in per_provider) + ']'
 
         if status == 'complete':
-            self.logger.info(f"✓ Tam: {nzb_path.name} ({total_segments} segment){detail}")
+            self.logger.info(f"✓ Tam: {name} ({total_segments} segment){detail}")
         elif status == 'missing':
             self.logger.warning(
-                f"✗ Eksik: {nzb_path.name} ({missing}/{total_segments} segment, "
+                f"✗ Eksik: {name} ({missing}/{total_segments} segment, "
                 f"%{percent:.1f} eksik){detail}")
         else:
-            self.logger.error(f"✗ Hatalı: {nzb_path.name}")
+            self.logger.error(f"✗ Hatalı: {name}")
 
         moved = self.move_nzb_file(nzb_path, self.folders[status])
         if not moved:
             self.move_failed += 1
         elapsed = round(time.time() - started, 2) if started else 0.0
         self.results.append({
-            'name': nzb_path.name,
+            'name': name,
             'status': status,
             'segments': total_segments,
             'checked': checked,
@@ -404,21 +463,24 @@ class NZBChecker:
             'providers': per_provider or [],
             'elapsed': elapsed,
             'moved': moved,
-            'checked_all': self.check_all,
+            'checked_all': self.check_all if checked_all is None else checked_all,
             'missing_ids': missing_ids or [],
         })
         with self.stats_lock:
             self.stats[status] += 1
-        self._emit('file_done', name=nzb_path.name, status=status,
+        self._emit('file_done', name=name, status=status,
                    segments=total_segments, checked=checked, missing=missing,
                    percent=round(percent, 1), providers=per_provider or [],
-                   moved=moved, elapsed=elapsed)
+                   moved=moved, elapsed=elapsed,
+                   checked_all=self.check_all if checked_all is None else checked_all)
 
     def _new_state(self, segments: List[Dict], targets: List[Dict]) -> Dict:
         """Bir dosyanın kademeli kontrol durumu"""
         return {
             'total': len(segments),
             'ids': [s['message_id'] for s in targets],
+            'all_ids': [s['message_id'] for s in segments],
+            'escalated': False,      # örnek tarama tam taramaya yükseltildi mi
             'found': set(),          # herhangi bir sağlayıcının bulduğu id'ler
             'answered': set(),       # en az bir sağlayıcının yanıtladığı id'ler
             'stage': 0,              # sıradaki provider
@@ -449,6 +511,8 @@ class NZBChecker:
                 self._finish_file(nzb_path, state)
                 return
             if state['stage'] >= len(self.providers):
+                if self._escalate(nzb_path, state):
+                    continue
                 self._finish_file(nzb_path, state)
                 return
 
@@ -492,6 +556,42 @@ class NZBChecker:
                 state['done'].add(index)
         self._start_next_stage(executor, nzb_path, state, futures)
 
+    def _escalate(self, nzb_path: Path, state: Dict) -> bool:
+        """
+        Örnek taramada eksik görülen dosyayı tam taramaya yükseltir.
+
+        Örnekte tek bir eksik bile şüpheli olduğu için, tam tarama yapılmadan
+        dosya "Tam" sayılmaz. Yükseltme bir kez yapılır.
+
+        Returns:
+            True ise aşamalar baştan kuruldu, tarama devam etmeli
+        """
+        if self.check_all or state['escalated']:
+            return False
+        # örnekte hiç eksik yoksa yükseltmeye gerek yok (zaten "Tam")
+        if all(mid in state['found'] for mid in state['ids']):
+            return False
+        rest = [mid for mid in state['all_ids'] if mid not in state['ids']]
+        if not rest:  # zaten tüm segmentler taranmış (örnek = tam)
+            state['escalated'] = True
+            return False
+        if not any(self._provider_ok):
+            return False
+        self.logger.info(
+            f"{nzb_path.name}: örnekte eksik segment görüldü, tam taramaya geçildi "
+            f"({len(rest)} ek segment)")
+        state['escalated'] = True
+        state['ids'] = list(state['all_ids'])
+        state['stage'] = 0
+        state['active'] = None
+        state['left'] = 0
+        state['stage_checked'] = set()
+        state['stage_missing'] = set()
+        state['stage_failed'] = False
+        state['done'] = set()
+        state['providers'] = {}
+        return True
+
     def _finish_file(self, nzb_path: Path, state: Dict):
         """
         Tüm aşamalar biten dosyayı sınıflandırır.
@@ -527,7 +627,7 @@ class NZBChecker:
             return out
 
         if self.cancel_event.is_set():
-            self._emit('file_done', name=nzb_path.name, status='cancelled',
+            self._emit('file_done', name=self._display_name(nzb_path), status='cancelled',
                        segments=total, checked=0, missing=0, percent=0.0,
                        providers=summary(), moved=False,
                        elapsed=round(time.time() - started, 2))
@@ -552,7 +652,8 @@ class NZBChecker:
         status = 'complete' if estimated_missing == 0 else 'missing'
         missing_ids = sorted(mid for mid in ids if mid not in state['found'])
         self._classify(nzb_path, status, total, estimated_missing, answered, started,
-                       percent, summary(), missing_ids=missing_ids)
+                       percent, summary(), missing_ids=missing_ids,
+                       checked_all=self.check_all or state['escalated'])
 
     def process_nzb_files(self):
         """
@@ -572,15 +673,16 @@ class NZBChecker:
             self._emit_scan_end(cancelled=False)
             return
 
-        nzb_files = sorted(p for p in nzb_folder.iterdir()
-                           if p.is_file() and p.suffix.lower() == '.nzb')
+        # alt klasörler dahil tara; çıktı klasörleri (complete/missing/error) hariç
+        nzb_files = iter_nzb_files(nzb_folder, self.folders.values())
 
         self._scan_started = time.time()
         self._scan_segments_done = 0
         self.results = []
         self.move_failed = 0
         self.provider_metrics = [
-            {'name': p['name'], 'stat': 0, 'cache': 0, 'errors': 0, 'active': True}
+            {'name': p['name'], 'stat': 0, 'cache': 0, 'errors': 0,
+             'missing': 0, 'active': True}
             for p in self.providers
         ]
 
@@ -679,6 +781,9 @@ class NZBChecker:
                             info = state['providers'][index]
                             info['checked'] += len(checked)
                             info['missing'] |= missing
+                            with self.stats_lock:
+                                if index < len(self.provider_metrics):
+                                    self.provider_metrics[index]['missing'] += len(missing)
                             state['stage_checked'] |= checked
                             state['stage_missing'] |= missing
                             state['answered'] |= checked
@@ -764,6 +869,13 @@ class NZBChecker:
         payload.update(self._scan_metrics())
         if error:
             payload['error'] = error
+        if not cancelled and not error:
+            save_scan_history({
+                'finished_at': time.time(),
+                'elapsed': payload.get('elapsed'),
+                'stats': dict(self.stats),
+                'providers': {p['name']: dict(p) for p in self.provider_metrics},
+            })
         self._emit('scan_end', **payload)
 
     def export_report(self, destination) -> Dict:
@@ -801,7 +913,9 @@ class NZBChecker:
                     missing_files += 1
                     missing_count += len(ids)
                     missing_dir.mkdir(parents=True, exist_ok=True)
-                    (missing_dir / f"{item['name']}.txt").write_text(
+                    # alt klasör adları dosya adına sığsın: a/b.nzb -> a_b.nzb.txt
+                    flat = item['name'].replace('/', '_').replace('\\', '_')
+                    (missing_dir / f'{flat}.txt').write_text(
                         '\n'.join(ids) + '\n', encoding='utf-8')
 
         info = {'folder': str(folder), 'csv': str(csv_path),

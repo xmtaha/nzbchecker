@@ -11,6 +11,9 @@ NZB dosyalarını Usenet sunucusunda kontrol eden ve eksik parçalara göre otom
    bulamadığı segmentler sonraki sağlayıcıya sorulur
 -  **Sonuç önbelleği (SQLite)**: tekrar taramalarda aynı segment için STAT gönderilmez
 -  **Ön uçuş kontrolü**: başlamadan önce her sağlayıcıya tek bağlantı denenir; erişilemeyen atlanır
+-  **Pipelining**: STAT komutları pencere hâlinde toplu gönderilir (RTT gizlenir, ~10-30× hız)
+-  **Akıllı örnekleme**: örnek taramada eksik görülen dosya otomatik tam taramaya yükseltilir
+-  **Alt klasör tarama**: klasör ağacı taranır, çıktı klasörleri (complete/missing/error) atlanır
 -  **Rapor**: CSV özeti + eksik segment (message-id) listeleri dışa aktarılır
 -  Eksik parçaları tespit etme
 -  Otomatik klasörleme (tam/eksik/hatalı)
@@ -145,6 +148,13 @@ Ayar dosyasının yeri:
 (veya `$XDG_CACHE_HOME/nzb_checker/cache.db`) konumundadır. `NZB_CHECKER_CACHE` ortam
 değişkeni ya da `settings.cache_path` ile değiştirilebilir; `cache: false` ile kapatılır.
 
+Aynı dizinde iki küçük durum dosyası tutulur:
+
+| Dosya | İçerik |
+| --- | --- |
+| `nzb_checker.log` | Tüm işlemlerin log kaydı |
+| `last_scan.json` | Son taramanın özeti ve sağlayıcı isabet oranları (sıralama için) |
+
 ## Güncellemeler
 
 Arayüz açılışta GitHub'daki en son release'i kontrol eder (`api.github.com`,
@@ -187,7 +197,8 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
 - **Güncelleme bildirimi**: açılışta GitHub release'leri kontrol edilir; yeni sürüm varsa
   sürüm notlarıyla (bloklamayan) bir pencere açılır. İndirme/yer değiştirme yapılmaz
 - Canlı durum tablosu (tam/eksik/hatalı, segment/kontrol/eksik sayıları, **Eksik %** tahmini, süre),
-  "Sadece eksik/hatalı" filtresi ve arama kutusu
+  "Sadece eksik/hatalı" filtresi ve arama kutusu. **Sütun başlığına tıklayınca sıralanır**
+  (ikinci tıklama ters çevirir); tam taranmayan dosyalar durum sütununda `Tam (örnek)` görünür
 - **Sağlayıcı bazlı sonuç**: tablodaki **Sağlayıcılar** kolonu her dosya için hangi sağlayıcının tam
   hangisinin eksik olduğunu gösterir (`Frugal ✓ · Eweka %3.2`). Yüzdeler o sağlayıcıya **sorulan**
   segmentlere göredir (kademeli tarama: sonraki sağlayıcıya yalnızca öncekilerin bulamadıkları
@@ -214,7 +225,9 @@ python3 tests/test_nzb_checker.py
 
 ## Nasıl Çalışır?
 
-1. **NZB Tarama**: Belirtilen klasördeki tüm `.nzb` dosyalarını bulur
+1. **NZB Tarama**: Belirtilen klasördeki tüm `.nzb` dosyalarını alt klasörler dahil bulur.
+   Çıktı klasörleri (`complete`/`missing`/`error`) atlanır; taşınmış dosyalar tekrar taranmaz.
+   Alt klasördeki dosyalar listede göreli yoluyla görünür (`alt/derin/ic.nzb`)
 2. **Ön uçuş**: her sağlayıcıya tek bağlantıyla erişim denenir. Bağlanılamayan sağlayıcı
    o taramada hiç kullanılmaz (her segmentte yeniden bağlanma denemesi olmaz). Hiçbir
    sağlayıcıya erişilemezse dosyalar taşınmadan tarama durur ve hata bildirilir
@@ -222,15 +235,20 @@ python3 tests/test_nzb_checker.py
    paralel işlenir hem de **tek bir NZB'nin segmentleri bu bağlantılara bölünür** — 20.000
    segmentlik dosya bile tüm bağlantıları kullanır. Sağlayıcılar sırayla taranır: P1'in
    bulamadığı segmentler P2'ye, P2'nin bulamadıkları P3'e sorulur. Böylece sağlam dosyalarda
-   STAT sayısı sağlayıcı sayısıyla çarpılmaz. Bağlantılar worker thread'lerce yeniden kullanılır
-   (dosya başına yeniden el sıkışma yok). Önbellekte taze kaydı olan segment hiç sorulmaz.
+   STAT sayısı sağlayıcı sayısıyla çarpılmaz. Sağlayıcı sırası önceki taramanın ölçülen isabet
+   oranına göre kurulur (en çok segmenti bulan önce sorulur). Bağlantılar worker thread'lerce
+   yeniden kullanılır (dosya başına yeniden el sıkışma yok). Önbellekte taze kaydı olan segment
+   hiç sorulmaz. STAT komutları 32'lik pencerelerle toplu gönderilir (pipelining), böylece
+   ağ gecikmesi komut sayısıyla çarpılmaz.
    Bir sağlayıcı tamamen çökerse tarama diğerleriyle sürer; ancak **hiçbir** sağlayıcı
    taranamadıysa dosya `error/`'a gider
 4. **Parse**: Her NZB dosyasını parse eder ve segment bilgilerini çıkarır
 5. **Kontrol**: 
    - `check_all_articles=false`: Örnek segmentleri kontrol eder (hızlı).
      Kontrol edilen segment sayısı = `max(sample_check_count, toplam × sample_ratio)`,
-     dosyaya eşit yayılır (ilk ve son segment dahil)
+     dosyaya eşit yayılır (ilk ve son segment dahil). Örnekte **en az bir eksik** segment
+     çıkarsa o dosya kalan segmentlerle **tam taramaya yükseltilir** (dosya başına bir kez);
+     hiç eksik görülmezse dosya "Tam" sayılır ve listede `(örnek)` olarak işaretlenir
    - `check_all_articles=true`: Tüm segmentleri kontrol eder (yavaş ama kesin)
 6. **Sınıflandırma**:
    - **complete/**: Eksik segment olmayan dosyalar
@@ -280,8 +298,10 @@ Klasörler:
 - **Paralel İşlem**: `connections` değerini provider limitine kadar artırın (tipik 50-60; fazlası `502 too many connections` verir)
 - **Tam Tarama Hızı**: `check_all_articles: true` ile 20.000 segment, 50 bağlantıda ~400 STAT/bağlantı → 30 ms RTT ile ~12 s
 - **Önbellek**: Aynı arşivi tekrar tararken `cache: true` (varsayılan) ile STAT sayısı
-  neredeyse sıfıra iner. Güncel olmayan sonuçlar için `cache_ttl_days` değerini düşürün
-- **Log Dosyası**: Tüm işlemler `nzb_checker.log` dosyasına kaydedilir
+  neredeyse sıfıra iner. "Var" sonuçları kısa (2 gün), "yok" sonuçları `cache_ttl_days`
+  kadar saklanır: DMCA/retention silmeleri bu sayede 2 gün içinde yakalanır
+- **Log Dosyası**: `~/.cache/nzb_checker/nzb_checker.log` (veya `$XDG_CACHE_HOME`) —
+  yazılamazsa yalnızca konsola yazılır
 - **Performans**: Usenet provider'ınız çok bağlantıya izin veriyorsa `connections` değerini artırın
 
 ## Lisans
