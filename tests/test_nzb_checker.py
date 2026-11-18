@@ -14,8 +14,8 @@ import tempfile
 import threading
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from nzb_checker import NZBChecker  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from nzb_checker.engine import NZBChecker  # noqa: E402
 
 EXIST = {f'ok-complete-{i}@test' for i in range(20)} | {f'ok-upper-{i}@test' for i in range(6)}
 EXIST |= {'ok-m1@test', 'ok-m2@test', 'ok-m4@test', 'drop-1@test', 'ok-d2@test'}

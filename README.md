@@ -40,9 +40,9 @@ chmod +x NZB-Checker-x86_64.AppImage
 Sistemdeki `python3` + `tkinter` kullanılır (yoksa uyarı gösterir:
 `sudo apt install python3-tk`). Python paket içine gömülmez, bu yüzden dosya ~1 MB'dir.
 
-Yeniden üretmek için: `./build_appimage.sh` (appimagetool'u gerekirse indirir).
+Yeniden üretmek için: `./packaging/build_appimage.sh` (appimagetool'u gerekirse indirir).
 
-Sürükle-bırak için `tkdnd/` klasöründeki Tcl paketi kullanılır (tkdnd 2.9.5, Tcl 9 uyumlu).
+Sürükle-bırak için `tkdnd/` klasöründeki Tcl paketi kullanılır (derlemede `nzb_checker/gui/tkdnd` içine kopyalanır) (tkdnd 2.9.5, Tcl 9 uyumlu).
 Paket repoda hazır durur, ayrıca kurulum gerekmez; ayrıntı için `tkdnd/NOTICE.txt`.
 
 ### Gömülü Python'lu sürüm (bundled)
@@ -58,11 +58,33 @@ Bundled sürümü üretmek için önce Python/Tcl-Tk ağacını hazırlayın (da
 `python3` + `libpython` + `libtcl9/libtcl9tk9` + `tcl9.0/tk9.0` script dizinleri), sonra:
 
 ```bash
-./build_appimage.sh NZB-Checker-bundled-x86_64.AppImage /yol/python-agaci
+./packaging/build_appimage.sh NZB-Checker-bundled-x86_64.AppImage /yol/python-agaci
 ```
 
 `python-agaci/` düzeni: `python3`, `libpython3.x.so`, `libtcl9*.so`, `lib/tcl9.0`, `lib/tk9.0`.
 `AppRun-bundled` bu düzeni `LD_LIBRARY_PATH`, `TCL_LIBRARY`, `TK_LIBRARY` ile kullanır.
+
+## Proje yapısı
+
+```
+nzb_checker/            # uygulama paketi
+├── __main__.py         #   giriş: python3 -m nzb_checker [gui|cli] [config]
+├── engine/             #   ağ + kontrol motoru (arayüzden bağımsız)
+│   ├── nntp_client.py  #     NNTP/SSL istemcisi (yeniden bağlanma, keepalive)
+│   ├── checker.py      #     NZBChecker: paralel tarama ve sınıflandırma
+│   └── cli.py          #     komut satırı akışı
+└── gui/                #   tkinter arayüzü
+    ├── theme.py        #     renkler, fontlar, ayar alanı tanımları
+    ├── config.py       #     ayar dosyası okuma/yazma, varsayılanlar
+    ├── widgets.py      #     sağlayıcı metni/dönüşümü, log köprüsü
+    ├── dialogs.py      #     sağlayıcı ekleme/düzenleme penceresi
+    └── app.py          #     ana pencere (liste, ayarlar, tarama)
+nzb_gui.py              # GUI kısayolu
+nzb_checker.py          # CLI kısayolu
+tkdnd/                  # sürükle-bırak Tcl paketi (vendor)
+packaging/              # AppRun, AppRun-bundled, build_appimage.sh, .desktop
+tests/                  # sahte NNTP sunucusuyla uçtan uca test
+```
 
 ## Yapılandırma
 
@@ -110,7 +132,7 @@ Ayar dosyasının yeri:
 
 ### Masaüstü arayüz (önerilen):
 ```bash
-python3 nzb_gui.py         # ya da ./NZB-Checker-x86_64.AppImage
+./nzb_gui.py               # ya da python3 -m nzb_checker
 ```
 
 Tüm ayarlar arayüzden yapılır (sağlayıcılar, bağlantı sayısı, klasörler, örnekleme,
@@ -139,13 +161,13 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
 
 ### Komut satırı:
 ```bash
-python3 nzb_checker.py                # config.json ile
-python3 nzb_checker.py my_config.json # özel config ile
+python3 -m nzb_checker cli               # config.json ile
+python3 -m nzb_checker cli my_config.json # özel config ile
 ```
 
 ### Test:
 ```bash
-python3 test_nzb_checker.py
+python3 tests/test_nzb_checker.py
 ```
 
 ## Nasıl Çalışır?

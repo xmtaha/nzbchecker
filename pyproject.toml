@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nzb-checker"
+version = "1.2.0"
+description = "Usenet NZB dosyalarını birden çok sağlayıcıyla kontrol eder ve eksik/hatalı olanları ayırır"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+readme = "README.md"
+
+[project.scripts]
+nzb-checker = "nzb_checker.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["nzb_checker*"]

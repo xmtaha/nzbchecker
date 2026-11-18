@@ -1,7 +1,7 @@
 #!/bin/sh
 # NZB Checker AppImage üretir: ./build_appimage.sh [çıktı.appimage]
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 out="$1"
 [ -n "$out" ] || out=NZB-Checker-x86_64.AppImage
@@ -19,15 +19,17 @@ fi
 appdir=/tmp/NZB-Checker.AppDir
 rm -rf "$appdir"
 mkdir -p "$appdir/usr/src"
-cp nzb_gui.py nzb_checker.py nntp_client.py "$appdir/usr/src/"
-cp -r tkdnd "$appdir/usr/src/tkdnd"
+cp -r nzb_checker "$appdir/usr/src/nzb_checker"
+find "$appdir/usr/src" -name __pycache__ -type d -exec rm -rf {} +
+cp -r tkdnd "$appdir/usr/src/nzb_checker/gui/tkdnd"
+cp config.json "$appdir/usr/src/config.json" 2>/dev/null || true
 if [ -n "$python_tree" ]; then
-    cp AppRun-bundled "$appdir/AppRun"
+    cp packaging/AppRun-bundled "$appdir/AppRun"
     cp -a "$python_tree" "$appdir/usr/python"
 else
-    cp AppRun "$appdir/AppRun"
+    cp packaging/AppRun "$appdir/AppRun"
 fi
-cp nzb-checker.desktop "$appdir/nzb-checker.desktop"
+cp packaging/nzb-checker.desktop "$appdir/nzb-checker.desktop"
 cp nzb-checker.png "$appdir/nzb-checker.png"
 cp nzb-checker.png "$appdir/.DirIcon"
 chmod -R a+rX "$appdir"
