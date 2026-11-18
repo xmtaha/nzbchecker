@@ -113,6 +113,21 @@ def pick_font(*names):
     return 'TkDefaultFont'
 
 
+def provider_text(providers, detailed=False):
+    """Sağlayıcı sonuçlarını tek satırda özetler: 'Frugal ✓ · Eweka %3.2'"""
+    parts = []
+    for p in providers or []:
+        name = p.get('name') or '?'
+        percent = p.get('percent') or 0.0
+        if not detailed:
+            parts.append(f"{name} {'✓' if percent < 0.05 else f'%{percent:.1f}'}")
+        elif percent < 0.05:
+            parts.append(f"{name}: tam")
+        else:
+            parts.append(f"{name}: %{percent:.1f} eksik ({p.get('missing', 0)} segment)")
+    return ' · '.join(parts)
+
+
 def provider_from_vars(vars_, fields=PROVIDER_FIELDS):
     """Form değişkenlerini provider sözlüğüne çevirir"""
     item = {}
@@ -335,6 +350,13 @@ class App(tk.Tk):
 
         tk.Label(bar, text='Ara', bg=SURFACE, fg=MUTED,
                  font=(self.ui_font, 9)).pack(side='left')
+        self.partial_missing = tk.BooleanVar(value=False)
+        tk.Checkbutton(bar, text='Bazı sağlayıcılarda eksik', variable=self.partial_missing,
+                       command=self._apply_filter, bg=SURFACE, fg=TEXT,
+                       activebackground=SURFACE, activeforeground=TEXT,
+                       selectcolor=SURFACE_2, bd=0, highlightthickness=0,
+                       font=(self.ui_font, 9)).pack(side='left', padx=(18, 0))
+
         self.search = tk.StringVar()
         entry = tk.Entry(bar, textvariable=self.search, width=22, bg=SURFACE_2, fg=TEXT,
                          insertbackground=TEXT, relief='flat', highlightthickness=1,
@@ -350,15 +372,17 @@ class App(tk.Tk):
         body = tk.Frame(self.files_tab, bg=SURFACE)
         body.pack(fill='both', expand=True, padx=12, pady=(0, 12))
 
-        columns = ('name', 'status', 'segments', 'checked', 'missing', 'percent', 'elapsed')
+        columns = ('name', 'status', 'segments', 'checked', 'missing', 'percent',
+                   'providers', 'elapsed')
         self.tree = ttk.Treeview(body, columns=columns, show='headings', selectmode='extended')
         for column, title, width, anchor in (
-                ('name', 'Dosya', 400, 'w'),
-                ('status', 'Durum', 120, 'w'),
+                ('name', 'Dosya', 340, 'w'),
+                ('status', 'Durum', 110, 'w'),
                 ('segments', 'Segment', 90, 'e'),
                 ('checked', 'Kontrol', 90, 'e'),
                 ('missing', 'Eksik', 90, 'e'),
                 ('percent', 'Eksik %', 90, 'e'),
+                ('providers', 'Sağlayıcılar', 300, 'w'),
                 ('elapsed', 'Süre', 90, 'e')):
             self.tree.heading(column, text=title, anchor=anchor)
             self.tree.column(column, width=width, anchor=anchor,
@@ -741,25 +765,34 @@ class App(tk.Tk):
         self._refresh_counts()
 
     def _upsert(self, name, status, segments=0, checked=0, missing=0, elapsed=0.0,
-                percent=None):
+                percent=None, providers=None):
         values = (name, STATUS_TEXT.get(status, status), segments, checked, missing,
                   f'%{percent:.1f}' if percent else '',
+                  provider_text(providers),
                   f'{elapsed:.1f}s' if elapsed else '')
         entry = self.rows.get(name)
         if entry is None:
             stripe = 'odd' if len(self.order) % 2 else 'even'
             iid = self.tree.insert('', 'end', values=values, tags=(stripe, status))
-            entry = {'iid': iid, 'status': status, 'visible': True, 'stripe': stripe}
+            entry = {'iid': iid, 'status': status, 'visible': True, 'stripe': stripe,
+                     'providers': providers or []}
             self.rows[name] = entry
             self.order.append(name)
         else:
             self.tree.item(entry['iid'], values=values, tags=(entry['stripe'], status))
             entry['status'] = status
+            entry['providers'] = providers or []
         self._show(name, self._row_wanted(name))
 
     def _row_wanted(self, name):
         entry = self.rows[name]
+        providers = entry.get('providers') or []
+        partial = (entry['status'] == 'complete'
+                   and any((p.get('percent') or 0) >= 0.05 for p in providers))
+        entry['partial'] = partial
         if self.only_problems.get() and entry['status'] not in VISIBLE_WHEN_FILTERED:
+            return False
+        if self.partial_missing.get() and not partial:
             return False
         text = self.search.get().strip().lower()
         return not text or text in name.lower()
@@ -939,9 +972,10 @@ class App(tk.Tk):
                          elapsed=data.get('elapsed', 0.0),
                          percent=data.get('percent') or None)
             providers = data.get('providers') or []
+            self._upsert(data['name'], status, providers=providers)
             if len(providers) > 1:
-                self._log('INFO', f"{data['name']}: " + ', '.join(
-                    f"{p['name']} %{p['percent']:.1f}" for p in providers))
+                level = 'INFO' if status == 'complete' else 'WARNING'
+                self._log(level, f"{data['name']} -> {provider_text(providers, True)}")
             if status in self.counts:
                 self.counts[status] += 1
             self._refresh_counts()

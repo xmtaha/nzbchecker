@@ -131,6 +131,10 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
   tekrar denenir
 - Canlı durum tablosu (tam/eksik/hatalı, segment/kontrol/eksik sayıları, **Eksik %** tahmini, süre),
   "Sadece eksik/hatalı" filtresi ve arama kutusu
+- **Sağlayıcı bazlı sonuç**: tablodaki **Sağlayıcılar** kolonu her dosya için hangi sağlayıcının tam
+  hangisinin eksik olduğunu gösterir (`Frugal ✓ · Eweka %3.2`). Dosya toplamda "Tam" olsa bile
+  bir sağlayıcıda eksik segment varsa satır **Bazı sağlayıcılarda eksik** filtresiyle bulunabilir
+  ve ayrıntı log'a yazılır (`Frugal: tam · Eweka: %3.2 eksik (12 segment)`)
 - Ölçek testi: 2.000 dosya x 20 segment (40.000 STAT), 50 bağlantı -> ~3 sn (yerel sunucu)
 
 ### Komut satırı:
