@@ -26,7 +26,8 @@ DEFAULTS = {
     'paths': {'nzb_folder': str(Path.home() / 'nzb'), 'complete_folder': 'complete',
               'missing_folder': 'missing', 'error_folder': 'error'},
     'settings': {'check_all_articles': False, 'sample_check_count': 20,
-                 'sample_ratio': 0.02, 'timeout': 30, 'log_level': 'INFO'},
+                 'sample_ratio': 0.02, 'timeout': 30, 'cache': True,
+                 'cache_ttl_days': 14, 'log_level': 'INFO'},
 }
 
 

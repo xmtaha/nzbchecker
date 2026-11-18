@@ -22,6 +22,8 @@
         "sample_check_count": 20,
         "sample_ratio": 0.02,
         "timeout": 30,
+        "cache": true,
+        "cache_ttl_days": 14,
         "log_level": "INFO"
     }
 }

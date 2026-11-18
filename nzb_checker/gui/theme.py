@@ -37,6 +37,8 @@ CHECK_FIELDS = [
     ('settings', 'sample_check_count', 'En az örnek segment', int),
     ('settings', 'sample_ratio', 'Örnek oranı (0.02 = %2)', float),
     ('settings', 'timeout', 'Timeout (sn)', int),
+    ('settings', 'cache', 'Sonuçları önbellekle', bool),
+    ('settings', 'cache_ttl_days', 'Önbellek ömrü (gün)', int),
     ('settings', 'log_level', 'Log seviyesi', ('DEBUG', 'INFO', 'WARNING', 'ERROR')),
 ]
 SPEC = PATH_FIELDS + CHECK_FIELDS

@@ -7,6 +7,9 @@ NZB dosyalarını Usenet sunucusunda kontrol eden ve eksik parçalara göre otom
 -  NZB dosyalarını otomatik tarama
 -  Usenet sunucusunda article kontrolü
 -  **Çoklu thread ile paralel işlem (10 NZB aynı anda)**
+-  **Kademeli sağlayıcı taraması**: her segment her sağlayıcıya değil, yalnızca öncekilerin
+   bulamadığı segmentler sonraki sağlayıcıya sorulur
+-  **Sonuç önbelleği (SQLite)**: tekrar taramalarda aynı segment için STAT gönderilmez
 -  Eksik parçaları tespit etme
 -  Otomatik klasörleme (tam/eksik/hatalı)
 -  Detaylı log kaydı
@@ -71,6 +74,7 @@ nzb_checker/            # uygulama paketi
 ├── __main__.py         #   giriş: python3 -m nzb_checker [gui|cli] [config]
 ├── engine/             #   ağ + kontrol motoru (arayüzden bağımsız)
 │   ├── nntp_client.py  #     NNTP/SSL istemcisi (yeniden bağlanma, keepalive)
+│   ├── cache.py        #     sağlayıcı yanıtı önbelleği (SQLite)
 │   ├── checker.py      #     NZBChecker: paralel tarama ve sınıflandırma
 │   └── cli.py          #     komut satırı akışı
 └── gui/                #   tkinter arayüzü
@@ -123,10 +127,16 @@ Ayar dosyasının yeri:
         "sample_check_count": 20,         // En az kaç segment kontrol edilsin
         "sample_ratio": 0.02,             // Ayrıca dosyanın bu kadarı kontrol edilir (0.02 = %2)
         "timeout": 30,                    // Bağlantı timeout (saniye)
+        "cache": true,                    // Sonuçları SQLite önbelleğinde tut
+        "cache_ttl_days": 14,             // Önbellek kaydı ömrü (gün)
         "log_level": "INFO"               // Log seviyesi: DEBUG, INFO, WARNING, ERROR
     }
 }
 ```
+
+Önbellek dosyası varsayılan olarak `~/.cache/nzb_checker/cache.db`
+(veya `$XDG_CACHE_HOME/nzb_checker/cache.db`) konumundadır. `NZB_CHECKER_CACHE` ortam
+değişkeni ya da `settings.cache_path` ile değiştirilebilir; `cache: false` ile kapatılır.
 
 ## Kullanım
 
@@ -154,9 +164,13 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
 - Canlı durum tablosu (tam/eksik/hatalı, segment/kontrol/eksik sayıları, **Eksik %** tahmini, süre),
   "Sadece eksik/hatalı" filtresi ve arama kutusu
 - **Sağlayıcı bazlı sonuç**: tablodaki **Sağlayıcılar** kolonu her dosya için hangi sağlayıcının tam
-  hangisinin eksik olduğunu gösterir (`Frugal ✓ · Eweka %3.2`). Dosya toplamda "Tam" olsa bile
-  bir sağlayıcıda eksik segment varsa satır **Bazı sağlayıcılarda eksik** filtresiyle bulunabilir
+  hangisinin eksik olduğunu gösterir (`Frugal ✓ · Eweka %3.2`). Yüzdeler o sağlayıcıya **sorulan**
+  segmentlere göredir (kademeli tarama: sonraki sağlayıcıya yalnızca öncekilerin bulamadıkları
+  sorulur). Dosya toplamda "Tam" olsa bile bir sağlayıcıda eksik segment varsa satır
+  **Bazı sağlayıcılarda eksik** filtresiyle bulunabilir
   ve ayrıntı log'a yazılır (`Frugal: tam · Eweka: %3.2 eksik (12 segment)`)
+- **Canlı ilerleme**: büyük bir NZB taranırken satırdaki kontrol sayısı ve durum çubuğu
+  segment ilerlemesini gösterir
 - Ölçek testi: 2.000 dosya x 20 segment (40.000 STAT), 50 bağlantı -> ~3 sn (yerel sunucu)
 
 ### Komut satırı:
@@ -173,10 +187,14 @@ python3 tests/test_nzb_checker.py
 ## Nasıl Çalışır?
 
 1. **NZB Tarama**: Belirtilen klasördeki tüm `.nzb` dosyalarını bulur
-2. **Paralel İşlem**: `connections` kadar bağlantı açılır. Hem birden fazla NZB paralel işlenir
-   hem de **tek bir NZB'nin segmentleri bu bağlantılara bölünür** — 20.000 segmentlik dosya
-   bile tüm bağlantıları kullanır. Bağlantılar worker thread'lerce yeniden kullanılır
-   (dosya başına yeniden el sıkışma yok)
+2. **Paralel ve kademeli işlem**: `connections` kadar bağlantı açılır. Hem birden fazla NZB
+   paralel işlenir hem de **tek bir NZB'nin segmentleri bu bağlantılara bölünür** — 20.000
+   segmentlik dosya bile tüm bağlantıları kullanır. Sağlayıcılar sırayla taranır: P1'in
+   bulamadığı segmentler P2'ye, P2'nin bulamadıkları P3'e sorulur. Böylece sağlam dosyalarda
+   STAT sayısı sağlayıcı sayısıyla çarpılmaz. Bağlantılar worker thread'lerce yeniden kullanılır
+   (dosya başına yeniden el sıkışma yok). Önbellekte taze kaydı olan segment hiç sorulmaz.
+   Bir sağlayıcı tamamen çökerse tarama diğerleriyle sürer; ancak **hiçbir** sağlayıcı
+   taranamadıysa dosya `error/`'a gider
 3. **Parse**: Her NZB dosyasını parse eder ve segment bilgilerini çıkarır
 4. **Kontrol**: 
    - `check_all_articles=false`: Örnek segmentleri kontrol eder (hızlı).
@@ -186,7 +204,9 @@ python3 tests/test_nzb_checker.py
 5. **Sınıflandırma**:
    - **complete/**: Eksik segment olmayan dosyalar
    - **missing/**: Eksik segmentli dosyalar
-   - **error/**: Parse edilemeyen veya hatalı dosyalar
+   - **error/**: Parse edilemeyen veya hiçbir sağlayıcıda taranamayan dosyalar
+   - Hedef klasörde aynı ad varsa dosya `ad (1).nzb` olarak taşınır; taşıma başarısız olursa
+     dosya yerinde bırakılır ve özette "Taşınamayan" olarak raporlanır
 
 ## Örnek Çıktı
 
@@ -228,6 +248,8 @@ Klasörler:
 - **Büyük Arşivler**: Büyük arşivler için önce örnek kontrolle başlayın
 - **Paralel İşlem**: `connections` değerini provider limitine kadar artırın (tipik 50-60; fazlası `502 too many connections` verir)
 - **Tam Tarama Hızı**: `check_all_articles: true` ile 20.000 segment, 50 bağlantıda ~400 STAT/bağlantı → 30 ms RTT ile ~12 s
+- **Önbellek**: Aynı arşivi tekrar tararken `cache: true` (varsayılan) ile STAT sayısı
+  neredeyse sıfıra iner. Güncel olmayan sonuçlar için `cache_ttl_days` değerini düşürün
 - **Log Dosyası**: Tüm işlemler `nzb_checker.log` dosyasına kaydedilir
 - **Performans**: Usenet provider'ınız çok bağlantıya izin veriyorsa `connections` değerini artırın
 

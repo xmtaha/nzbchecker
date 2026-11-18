@@ -547,24 +547,32 @@ class App(tk.Tk):
         self.count_label.config(text='0 dosya')
         self._refresh_counts()
 
-    def _upsert(self, name, status, segments=0, checked=0, missing=0, elapsed=0.0,
-                percent=None, providers=None):
-        values = (name, STATUS_TEXT.get(status, status), segments, checked, missing,
-                  f'%{percent:.1f}' if percent else '',
-                  provider_text(providers),
-                  f'{elapsed:.1f}s' if elapsed else '')
+    def _upsert(self, name, status, **fields):
+        """Satırı ekler/günceller. Yalnızca verilen alanlar değişir; böylece
+        önce yazılan segment/süre değerleri sonraki güncellemede sıfırlanmaz."""
         entry = self.rows.get(name)
         if entry is None:
             stripe = 'odd' if len(self.order) % 2 else 'even'
-            iid = self.tree.insert('', 'end', values=values, tags=(stripe, status))
+            iid = self.tree.insert('', 'end', tags=(stripe, status))
             entry = {'iid': iid, 'status': status, 'visible': True, 'stripe': stripe,
-                     'providers': providers or []}
+                     'segments': 0, 'checked': 0, 'missing': 0, 'percent': None,
+                     'providers': [], 'elapsed': 0.0}
             self.rows[name] = entry
             self.order.append(name)
-        else:
-            self.tree.item(entry['iid'], values=values, tags=(entry['stripe'], status))
-            entry['status'] = status
-            entry['providers'] = providers or []
+
+        entry['status'] = status
+        if 'providers' in fields:
+            entry['providers'] = fields['providers'] or []
+        for key in ('segments', 'checked', 'missing', 'percent', 'elapsed'):
+            if key in fields and fields[key] is not None:
+                entry[key] = fields[key]
+
+        values = (name, STATUS_TEXT.get(status, status), entry['segments'],
+                  entry['checked'], entry['missing'],
+                  f"%{entry['percent']:.1f}" if entry['percent'] else '',
+                  provider_text(entry['providers']),
+                  f"{entry['elapsed']:.1f}s" if entry['elapsed'] else '')
+        self.tree.item(entry['iid'], values=values, tags=(entry['stripe'], status))
         self._show(name, self._row_wanted(name))
 
     def _row_wanted(self, name):
@@ -748,14 +756,24 @@ class App(tk.Tk):
             self._upsert(data['name'], 'running', segments=data.get('segments', 0))
             self._set_status('Kontrol ediliyor', ACCENT)
 
+        elif kind == 'file_progress':
+            to_check = data.get('to_check') or 0
+            checked = data.get('checked') or 0
+            self._upsert(data['name'], 'running', checked=checked,
+                         segments=data.get('segments'))
+            percent = 100.0 * checked / to_check if to_check else 0.0
+            self._set_status(f'Kontrol ediliyor — %{percent:.0f}', ACCENT)
+
         elif kind == 'file_done':
             status = data.get('status', 'error')
+            providers = data.get('providers') or []
             self._upsert(data['name'], status, segments=data.get('segments', 0),
                          checked=data.get('checked', 0), missing=data.get('missing', 0),
                          elapsed=data.get('elapsed', 0.0),
-                         percent=data.get('percent') or None)
-            providers = data.get('providers') or []
-            self._upsert(data['name'], status, providers=providers)
+                         percent=data.get('percent') or None,
+                         providers=providers)
+            if data.get('moved') is False and status != 'cancelled':
+                self._log('WARNING', f"{data['name']}: taşınamadı, yerinde bırakıldı")
             if len(providers) > 1:
                 level = 'INFO' if status == 'complete' else 'WARNING'
                 self._log(level, f"{data['name']} -> {provider_text(providers, True)}")
@@ -774,10 +792,14 @@ class App(tk.Tk):
         elif kind == 'scan_end':
             self.progress['value'] = self.progress['maximum']
             cancelled = data.get('cancelled')
-            self.summary_label.config(
-                text=(f"{'Durduruldu' if cancelled else 'Bitti'} — "
-                      f"Tam: {data.get('complete', 0)}, Eksik: {data.get('missing', 0)}, "
-                      f"Hatalı: {data.get('error', 0)}"))
+            moved_failed = data.get('move_failed') or 0
+            summary = (f"{'Durduruldu' if cancelled else 'Bitti'} — "
+                       f"Tam: {data.get('complete', 0)}, Eksik: {data.get('missing', 0)}, "
+                       f"Hatalı: {data.get('error', 0)}")
+            if moved_failed:
+                summary += f", Taşınamayan: {moved_failed}"
+                self._log('WARNING', f'{moved_failed} dosya hedef klasöre taşınamadı')
+            self.summary_label.config(text=summary)
             self._set_status('Durduruldu' if cancelled else 'Bitti', AMBER if cancelled else GREEN)
             self.start_btn.config(state='normal')
             self.stop_btn.config(state='disabled', fg='#5b6270')

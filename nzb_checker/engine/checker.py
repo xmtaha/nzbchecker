@@ -4,23 +4,23 @@
 NZBChecker - NZB dosyalarını paralel kontrol eder ve eksik parçalara göre sınıflandırır
 """
 
-import os
 import json
-import sys
-import math
-import time
 import logging
+import math
 import shutil
+import sys
+import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event, Lock, Semaphore, local
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 try:
     from nntplib import NNTP, NNTP_SSL
 except ModuleNotFoundError:  # Python 3.13+ nntplib icermez
     from .nntp_client import NNTP, NNTP_SSL
+from .cache import ResultCache, provider_key
 from .nntp_client import ArticleNotFound
 
 
@@ -62,6 +62,7 @@ class NZBChecker:
         self.sample_count = max(1, int(settings.get('sample_check_count', 20)))
         self.sample_ratio = float(settings.get('sample_ratio', 0.02))
         self.timeout = settings.get('timeout', 30)
+        self.move_failed = 0
 
         # thread-local bağlantı havuzu: her worker thread provider başına bir bağlantı açar,
         # aynı görevde yeniden kullanır
@@ -69,6 +70,13 @@ class NZBChecker:
         self._connections: List = []
         # provider başına eşzamanlı bağlantı sınırı (thread'ler ortak havuzdan görev alır)
         self._slots = [Semaphore(p['connections']) for p in self.providers]
+        self._provider_keys = [provider_key(p) for p in self.providers]
+
+        # sonuç önbelleği: aynı message-id tekrar STAT edilmesin
+        cache_enabled = bool(settings.get('cache', True))
+        cache_path = settings.get('cache_path') or None
+        ttl_days = int(settings.get('cache_ttl_days', 14))
+        self.cache = ResultCache(cache_path, ttl_days) if cache_enabled else None
 
         self.events = events or (lambda kind, **data: None)
         self.cancel_event = Event()
@@ -271,39 +279,71 @@ class NZBChecker:
                 return False
             raise
 
-    def _check_chunk(self, index: int, chunk: List[Dict]) -> Tuple[int, int, Set[str]]:
+    def _check_chunk(self, index: int, message_ids: List[str]) -> Tuple[Set[str], Set[str]]:
         """
-        Bir segment dilimini bir provider üzerinde kontrol eder.
+        Bir segment dilimini tek provider üzerinde kontrol eder.
+
+        Önce önbelleğe bakılır; önbellekte olmayan id'ler için STAT gönderilir.
+        Dilim içinde hata olursa sonuçlar kaydedilmez (sonraki provider tekrar sorar).
 
         Returns:
-            (provider index, kontrol edilen, eksik message_id kümesi)
+            (kontrol edilen id'ler, eksik id'ler)
         """
-        checked = 0
+        key = self._provider_keys[index]
+        cache = self.cache
+        checked: Set[str] = set()
         missing: Set[str] = set()
+        updates: Dict[str, bool] = {}
+
         with self._slots[index]:
             try:
-                conn = self._connection(index)
-                for segment in chunk:
+                cached = cache.get_many(key, message_ids) if cache is not None else {}
+                conn = None
+                for message_id in message_ids:
                     if self.cancel_event.is_set():
                         break
-                    checked += 1
-                    if not self.check_article_exists(conn, segment['message_id']):
-                        missing.add(segment['message_id'])
-                return index, checked, missing
+                    if message_id in cached:
+                        checked.add(message_id)
+                        if not cached[message_id]:
+                            missing.add(message_id)
+                        continue
+                    if conn is None:
+                        conn = self._connection(index)
+                    checked.add(message_id)
+                    exists = self.check_article_exists(conn, message_id)
+                    updates[message_id] = exists
+                    if not exists:
+                        missing.add(message_id)
+                return checked, missing
             except Exception:
                 self._drop_connection(index)
                 raise
+            finally:
+                if cache is not None and updates:
+                    cache.put_many(key, updates)
 
     # ------------------------------------------------------------------ dosya işleme
 
-    def move_nzb_file(self, nzb_path: Path, destination_folder: Path):
-        """NZB dosyasını hedef klasöre taşır"""
+    def move_nzb_file(self, nzb_path: Path, destination_folder: Path) -> bool:
+        """NZB dosyasını hedef klasöre taşır (ad çakışırsa numaralandırır)"""
         try:
-            dest_path = destination_folder / nzb_path.name
-            shutil.move(str(nzb_path), str(dest_path))
-            self.logger.info(f"Taşındı: {nzb_path.name} -> {destination_folder.name}")
+            destination = destination_folder / nzb_path.name
+            with self.stats_lock:
+                if destination.exists():
+                    stem, suffix = nzb_path.stem, nzb_path.suffix
+                    for number in range(1, 1000):
+                        candidate = destination_folder / f'{stem} ({number}){suffix}'
+                        if not candidate.exists():
+                            destination = candidate
+                            break
+                    else:
+                        raise FileExistsError(f"benzersiz ad bulunamadı: {destination}")
+                shutil.move(str(nzb_path), str(destination))
+            self.logger.info(f"Taşındı: {nzb_path.name} -> {destination_folder.name}/{destination.name}")
+            return True
         except Exception as e:
             self.logger.error(f"Dosya taşıma hatası ({nzb_path}): {e}")
+            return False
 
     def _classify(self, nzb_path: Path, status: str, total_segments: int = 0,
                   missing: int = 0, checked: int = 0, started: Optional[float] = None,
@@ -323,75 +363,161 @@ class NZBChecker:
         else:
             self.logger.error(f"✗ Hatalı: {nzb_path.name}")
 
-        self.move_nzb_file(nzb_path, self.folders[status])
+        moved = self.move_nzb_file(nzb_path, self.folders[status])
+        if not moved:
+            self.move_failed += 1
         with self.stats_lock:
             self.stats[status] += 1
         self._emit('file_done', name=nzb_path.name, status=status,
                    segments=total_segments, checked=checked, missing=missing,
                    percent=round(percent, 1), providers=per_provider or [],
+                   moved=moved,
                    elapsed=round(time.time() - started, 2) if started else 0.0)
+
+    def _new_state(self, segments: List[Dict], targets: List[Dict]) -> Dict:
+        """Bir dosyanın kademeli kontrol durumu"""
+        return {
+            'total': len(segments),
+            'ids': [s['message_id'] for s in targets],
+            'found': set(),          # herhangi bir sağlayıcının bulduğu id'ler
+            'answered': set(),       # en az bir sağlayıcının yanıtladığı id'ler
+            'stage': 0,              # sıradaki provider
+            'active': None,          # uçuşta dilimi olan provider
+            'left': 0,               # aktif aşamadaki kalan dilim
+            'stage_checked': set(),
+            'stage_missing': set(),
+            'stage_failed': False,
+            'providers': {},         # index -> {'checked': int, 'missing': set}
+            'done': set(),           # aşamasını hatasız bitiren provider'lar
+            'started': time.time(),
+            'last_progress': 0.0,
+            'finished': False,
+            'counted': False,
+        }
+
+    def _start_next_stage(self, executor: ThreadPoolExecutor, nzb_path: Path,
+                          state: Dict, futures: Dict):
+        """
+        Sıradaki provider için yalnızca henüz bulunamayan segmentleri gönderir.
+
+        Kademeli tarama: P1 tüm örnekleri kontrol eder, P2 yalnızca P1'in
+        bulamadıklarını... Böylece sağlam dosyalarda STAT sayısı sağlayıcı
+        sayısıyla çarpılmaz.
+        """
+        while True:
+            if self.cancel_event.is_set():
+                self._finish_file(nzb_path, state)
+                return
+            if state['stage'] >= len(self.providers):
+                self._finish_file(nzb_path, state)
+                return
+
+            index = state['stage']
+            candidates = [mid for mid in state['ids'] if mid not in state['found']]
+            if not candidates:  # bu sağlayıcıya soracak bir şey kalmadı
+                state['done'].add(index)
+                state['providers'].setdefault(index, {'checked': 0, 'missing': set()})
+                state['stage'] += 1
+                continue
+
+            state['stage'] += 1
+            state['active'] = index
+            state['stage_checked'] = set()
+            state['stage_missing'] = set()
+            state['stage_failed'] = False
+            state['providers'].setdefault(index, {'checked': 0, 'missing': set()})
+
+            size = max(1, math.ceil(len(candidates) / self.providers[index]['connections']))
+            chunks = [candidates[i:i + size] for i in range(0, len(candidates), size)]
+            state['left'] = len(chunks)
+            for chunk in chunks:
+                futures[executor.submit(self._check_chunk, index, chunk)] = (nzb_path, index)
+            return
+
+    def _stage_finished(self, executor: ThreadPoolExecutor, nzb_path: Path,
+                        state: Dict, futures: Dict):
+        """Aktif aşama bitti: bulunanları işle, sonraki sağlayıcıya geç"""
+        index = state['active']
+        if index is not None:
+            # yalnızca gerçekten yanıtlanan id'ler "bulundu" sayılır
+            state['found'] |= (state['stage_checked'] - state['stage_missing'])
+            if state['stage_failed']:
+                self.logger.warning(
+                    f"{nzb_path.name}: {self.providers[index]['name']} taraması "
+                    f"tamamlanamadı, kalan sağlayıcılarla devam ediliyor")
+            else:
+                state['done'].add(index)
+        self._start_next_stage(executor, nzb_path, state, futures)
 
     def _finish_file(self, nzb_path: Path, state: Dict):
         """
-        Tüm dilimleri biten dosyayı sınıflandırır.
+        Tüm aşamalar biten dosyayı sınıflandırır.
 
-        Segment, kontrol eden provider'ların HEPSİNDE yoksa eksik sayılır
-        (başka bir provider'da varsa dosya indirilebilir).
+        Bir segment ancak kontrol edilebilen sağlayıcıların hiçbirinde
+        bulunamazsa eksik sayılır. Hiçbir sağlayıcı aşamasını tamamlayamadıysa
+        dosya hatalı kabul edilir (ağ/kimlik sorunu).
         """
+        if state['finished']:
+            return
+        state['finished'] = True
+
         total = state['total']
-        targets = state['targets']
-        providers = state['providers']
+        ids = state['ids']
         started = state['started']
 
         def summary():
-            return [{'name': self.providers[i]['name'],
-                     'missing': len(p['missing']),
-                     'percent': round(100.0 * len(p['missing']) / p['checked'], 1) if p['checked'] else 0.0}
-                    for i, p in providers.items()]
+            out = []
+            for i, provider in enumerate(self.providers):
+                info = state['providers'].get(i) or {'checked': 0, 'missing': set()}
+                checked = info['checked']
+                out.append({
+                    'name': provider['name'],
+                    'missing': len(info['missing']),
+                    'percent': round(100.0 * len(info['missing']) / checked, 1) if checked else 0.0,
+                })
+            return out
 
         if self.cancel_event.is_set():
             self._emit('file_done', name=nzb_path.name, status='cancelled',
                        segments=total, checked=0, missing=0, percent=0.0,
-                       providers=summary(), elapsed=round(time.time() - started, 2))
+                       providers=summary(), moved=False,
+                       elapsed=round(time.time() - started, 2))
             return
 
-        if state.get('failed'):
+        if not state['done']:
+            self.logger.error(
+                f"✗ Hatalı: {nzb_path.name} (hiçbir sağlayıcı taraması tamamlanmadı)")
+            self._classify(nzb_path, 'error', total, started=started,
+                           per_provider=summary())
             return
 
-        # tüm hedef segmentleri kontrol etmiş provider'lar güvenilir kaynak sayılır
-        done = [p for p in providers.values() if p['checked'] >= targets]
-        if not done:
-            self.logger.error(f"✗ Hatalı: {nzb_path.name} (hiçbir provider taraması tamamlanmadı)")
-            self._classify(nzb_path, 'error', total, started=started, per_provider=summary())
-            return
-
-        checked = max(p['checked'] for p in done)
-        common = set.intersection(*[p['missing'] for p in done])
-        found_missing = len(common)
-
-        if self.check_all or (checked >= total and len(done) == len(providers)):
-            estimated_missing = found_missing              # kesin sayım
+        found_missing = sum(1 for mid in ids if mid not in state['found'])
+        answered = len(state['answered'])
+        base = len(ids) if answered >= len(ids) else answered
+        if base and base < total:
+            estimated_missing = min(total, int(round(total * found_missing / base)))
         else:
-            estimated_missing = int(total * found_missing / checked) if checked else 0
+            estimated_missing = found_missing
 
         percent = 100.0 * estimated_missing / total if total else 0.0
         status = 'complete' if estimated_missing == 0 else 'missing'
-        self._classify(nzb_path, status, total, estimated_missing, checked, started,
+        self._classify(nzb_path, status, total, estimated_missing, answered, started,
                        percent, summary())
 
     def process_nzb_files(self):
         """
         Tüm NZB dosyalarını paralel işler.
 
-        Bir dosyanın segmentleri bağlantı sayısına bölünür: tek büyük NZB bile
-        tüm bağlantıları kullanır. Worker thread'ler bağlantılarını yeniden kullanır,
-        böylece dosya başına yeniden el sıkışma olmaz.
+        Bir dosyanın segmentleri sağlayıcılara kademeli dağıtılır: bir sonraki
+        sağlayıcıya yalnızca öncekilerin bulamadığı segmentler sorulur. Tek
+        büyük NZB bile tüm bağlantıları kullanır; worker thread'ler bağlantılarını
+        yeniden kullanır, böylece dosya başına yeniden el sıkışma olmaz.
         """
         nzb_folder = Path(self.config['paths']['nzb_folder'])
 
         if not nzb_folder.exists():
             self.logger.error(f"NZB klasörü bulunamadı: {nzb_folder}")
-            self._emit('scan_end', **self.stats, cancelled=False)
+            self._emit('scan_end', **self.stats, cancelled=False, move_failed=self.move_failed)
             return
 
         nzb_files = sorted(p for p in nzb_folder.iterdir()
@@ -399,21 +525,37 @@ class NZBChecker:
 
         if not nzb_files:
             self.logger.warning(f"NZB dosyası bulunamadı: {nzb_folder}")
-            self._emit('scan_end', **self.stats, cancelled=False)
+            self._emit('scan_end', **self.stats, cancelled=False, move_failed=self.move_failed)
             return
 
         total_files = len(nzb_files)
         self.stats['total'] = total_files
         self.logger.info(f"Toplam {total_files} NZB dosyası bulundu")
         self.logger.info(f"{len(self.providers)} provider, toplam paralel bağlantı: {self.max_workers}")
+        if self.cache is not None and self.cache.enabled:
+            self.logger.info(f"Sonuç önbelleği: {self.cache.path}")
         for provider in self.providers:
             self.logger.info(f"  - {provider['name']}: {provider['host']}:{provider['port']} "
                              f"({provider['connections']} bağlantı, "
                              f"{'SSL' if provider['use_ssl'] else 'düz'})")
         self._emit('scan_start', total=total_files)
 
+        if self.cache is not None:
+            self.cache.prune()
+
         pending: Dict[Path, Dict] = {}
-        futures = {}
+        futures: Dict = {}
+        completed = 0
+
+        def done_file(nzb_path: Path, state: Dict):
+            nonlocal completed
+            if not state.get('finished') or state.get('counted'):
+                return
+            state['counted'] = True
+            completed += 1
+            self._emit('progress', completed=completed, total=total_files)
+            if completed % 10 == 0:
+                self.logger.info(f"İlerleme: {completed}/{total_files} dosya işlendi")
 
         try:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -426,55 +568,58 @@ class NZBChecker:
                         self.logger.error(f"NZB okuma hatası ({nzb_path.name}): {e}")
                         self._emit('file_error', name=nzb_path.name, message=str(e))
                         self._classify(nzb_path, 'error')
+                        completed += 1
+                        self._emit('progress', completed=completed, total=total_files)
                         continue
 
                     targets = self.segments_to_check(segments)
-
-                    state = {'total': len(segments), 'targets': len(targets), 'left': 0,
-                             'failed': False, 'started': time.time(), 'providers': {}}
-                    chunk_total = 0
-                    for index, provider in enumerate(self.providers):
-                        size = max(1, math.ceil(len(targets) / provider['connections']))
-                        chunks = [targets[i:i + size] for i in range(0, len(targets), size)]
-                        state['providers'][index] = {'checked': 0, 'missing': set()}
-                        chunk_total += len(chunks)
-                        for chunk in chunks:
-                            futures[executor.submit(self._check_chunk, index, chunk)] = nzb_path
-                    state['left'] = chunk_total
+                    state = self._new_state(segments, targets)
+                    pending[nzb_path] = state
 
                     self.logger.info(
-                        f"[{len(pending) + 1}/{total_files}] Kontrol ediliyor: {nzb_path.name} "
+                        f"[{len(pending)}/{total_files}] Kontrol ediliyor: {nzb_path.name} "
                         f"({len(targets)}/{len(segments)} segment x {len(self.providers)} provider)")
-
-                    pending[nzb_path] = state
                     self._emit('file_start', name=nzb_path.name, segments=len(segments),
-                               to_check=len(targets), chunks=chunk_total)
+                               to_check=len(targets))
 
-                completed = 0
-                for future in as_completed(futures):
-                    nzb_path = futures[future]
-                    state = pending[nzb_path]
+                    self._start_next_stage(executor, nzb_path, state, futures)
+                    done_file(nzb_path, state)
 
-                    try:
-                        index, checked, missing_ids = future.result()
-                    except Exception as e:
-                        if not state['failed']:
-                            state['failed'] = True
-                            self.logger.error(f"Kontrol hatası ({nzb_path.name}): {e}")
+                while futures:
+                    done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+                    for future in done:
+                        nzb_path, index = futures.pop(future)
+                        state = pending[nzb_path]
+                        state['left'] -= 1
+
+                        try:
+                            checked, missing = future.result()
+                        except Exception as e:
+                            state['stage_failed'] = True
+                            self.logger.error(
+                                f"Kontrol hatası ({nzb_path.name}, "
+                                f"{self.providers[index]['name']}): {e}")
                             self._emit('file_error', name=nzb_path.name, message=str(e))
-                            self._classify(nzb_path, 'error', started=state['started'])
-                    else:
-                        item = state['providers'][index]
-                        item['checked'] += checked
-                        item['missing'] |= missing_ids
+                        else:
+                            info = state['providers'][index]
+                            info['checked'] += len(checked)
+                            info['missing'] |= missing
+                            state['stage_checked'] |= checked
+                            state['stage_missing'] |= missing
+                            state['answered'] |= checked
+                            now = time.time()
+                            if (state['answered'] and
+                                    (now - state['last_progress'] >= 0.15
+                                     or len(state['answered']) >= len(state['ids']))):
+                                state['last_progress'] = now
+                                self._emit('file_progress', name=nzb_path.name,
+                                           checked=len(state['answered']),
+                                           to_check=len(state['ids']),
+                                           segments=state['total'])
 
-                    state['left'] -= 1
-                    if state['left'] == 0:
-                        completed += 1
-                        self._finish_file(nzb_path, state)
-                        self._emit('progress', completed=completed, total=total_files)
-                        if completed % 10 == 0:
-                            self.logger.info(f"İlerleme: {completed}/{total_files} dosya işlendi")
+                        if state['left'] == 0:
+                            self._stage_finished(executor, nzb_path, state, futures)
+                            done_file(nzb_path, state)
 
         except KeyboardInterrupt:
             raise
@@ -483,7 +628,10 @@ class NZBChecker:
             self._emit('fatal', message=str(e))
         finally:
             self._close_connections()
-            self._emit('scan_end', **self.stats, cancelled=self.cancel_event.is_set())
+            if self.cache is not None:
+                self.cache.close()
+            self._emit('scan_end', **self.stats, cancelled=self.cancel_event.is_set(),
+                       move_failed=self.move_failed)
 
     def print_summary(self):
         """İşlem özetini yazdırır"""
@@ -494,6 +642,8 @@ class NZBChecker:
         print(f"Tam Dosyalar     : {self.stats['complete']}")
         print(f"Eksik Dosyalar   : {self.stats['missing']}")
         print(f"Hatalı Dosyalar  : {self.stats['error']}")
+        if self.move_failed:
+            print(f"Taşınamayan      : {self.move_failed}")
         print("=" * 60)
         print("\nProvider'lar:")
         for provider in self.providers:

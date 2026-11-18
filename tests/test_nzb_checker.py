@@ -95,7 +95,8 @@ def write_config(tmp, nzb_dir, port, providers=None, **settings):
         'paths': {'nzb_folder': str(nzb_dir), 'complete_folder': 'complete',
                   'missing_folder': 'missing', 'error_folder': 'error'},
         'settings': {'check_all_articles': False, 'sample_check_count': 20,
-                     'sample_ratio': 0.02, 'timeout': 10, 'log_level': 'INFO'},
+                     'sample_ratio': 0.02, 'timeout': 10, 'log_level': 'INFO',
+                     'cache': False},
     }
     config['settings'].update(settings)
     path = Path(tmp) / f'config_{len(list(Path(tmp).glob("config_*")))}.json'
@@ -178,8 +179,12 @@ def test_olaylar(tmp, port, capture):
     assert turler[0] == 'scan_start' and turler[-1] == 'scan_end', turler
     assert turler.count('file_start') == 1 and turler.count('file_done') == 1, turler
     assert turler.count('progress') == 1, turler
+    assert 'file_progress' in turler, turler
+    progress = [d for k, d in olaylar if k == 'file_progress'][-1]
+    assert progress['checked'] == 20 and progress['to_check'] == 20, progress
     done = dict(olaylar)['file_done']
     assert done['status'] == 'complete' and done['missing'] == 0 and done['checked'] == 20, done
+    assert done['moved'] is True, done
     assert dict(olaylar)['scan_end']['complete'] == 1, olaylar[-1]
     assert not dict(olaylar)['scan_end']['cancelled'], olaylar[-1]
 
@@ -206,6 +211,105 @@ def test_iptal(tmp, port, capture):
     assert any(k == 'scan_end' and d['cancelled'] for k, d in olaylar), olaylar[-1]
     kalan = [p.name for p in nzb_dir.iterdir() if p.suffix.lower() == '.nzb']
     assert len(kalan) == 5, f'iptal edilen dosyalar tasinmamali: {kalan}'
+
+
+def test_tasima_cakismasi(tmp, port, capture):
+    """Hedef klasorde ayni ad varsa dosya numaralandirilir, uzerine yazilmaz"""
+    nzb_dir = Path(tmp) / 'collision'
+    nzb_dir.mkdir()
+    (nzb_dir / 'complete').mkdir()
+    (nzb_dir / 'complete' / 'same.nzb').write_text('eski', encoding='utf-8')
+    (nzb_dir / 'same.nzb').write_text(
+        nzb([f'ok-complete-{i}@test' for i in range(20)]), encoding='utf-8')
+
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, check_all_articles=True)))
+    checker.process_nzb_files()
+
+    assert sorted(os.listdir(nzb_dir / 'complete')) == ['same (1).nzb', 'same.nzb'], \
+        os.listdir(nzb_dir / 'complete')
+    assert (nzb_dir / 'complete' / 'same.nzb').read_text(encoding='utf-8') == 'eski'
+    assert checker.move_failed == 0
+
+
+def test_saglayici_hatasi(tmp, port, capture):
+    """Bir saglayici tamamen erisilemezse digerinin sonucu kullanilir (dosya hatali olmaz)"""
+    nzb_dir = Path(tmp) / 'fallback'
+    nzb_dir.mkdir()
+    (nzb_dir / 'fallback.nzb').write_text(
+        nzb([f'ok-complete-{i}@test' for i in range(10)]), encoding='utf-8')
+
+    import socket
+    dead = socket.socket()
+    dead.bind(('127.0.0.1', 0))
+    dead_port = dead.getsockname()[1]
+    dead.close()
+
+    providers = [
+        {'name': 'Olu', 'host': '127.0.0.1', 'port': dead_port, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 2},
+        {'name': 'P1', 'host': '127.0.0.1', 'port': port, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 4},
+    ]
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, providers=providers,
+                                          check_all_articles=True)))
+    checker.process_nzb_files()
+
+    placed = placed_in(nzb_dir)
+    assert placed['complete'] == ['fallback.nzb'], placed
+    assert checker.stats == {'total': 1, 'complete': 1, 'missing': 0, 'error': 0}, checker.stats
+
+
+def test_kademeli_provider(tmp, port2, port, capture):
+    """P2'ye yalnizca P1'in bulamadigi segmentler sorulur (STAT sayisi duser)"""
+    nzb_dir = Path(tmp) / 'staged'
+    nzb_dir.mkdir()
+    ids = [f'stage-a{i}@test' for i in range(10)]
+    (nzb_dir / 'staged.nzb').write_text(nzb(ids), encoding='utf-8')
+
+    EXIST_BY_PORT[port] = set(ids) - {'stage-a3@test', 'stage-a7@test'}
+    EXIST_BY_PORT[port2] = set(ids) - {'stage-a7@test'}
+    providers = [
+        {'name': 'P1', 'host': '127.0.0.1', 'port': port, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 4},
+        {'name': 'P2', 'host': '127.0.0.1', 'port': port2, 'username': 'u',
+         'password': 'p', 'use_ssl': False, 'connections': 4},
+    ]
+
+    SEEN['stat'] = 0
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, providers=providers,
+                                          check_all_articles=True)))
+    checker.process_nzb_files()
+
+    placed = placed_in(nzb_dir)
+    assert placed['missing'] == ['staged.nzb'], placed
+    # P1: 10 STAT, P2: yalnizca P1'in eksik dedigi 2 segment -> toplam 12 (eski davranis 20)
+    assert SEEN['stat'] == 12, f"beklenen 12 STAT, gelen {SEEN['stat']}"
+
+    EXIST_BY_PORT.pop(port, None)
+    EXIST_BY_PORT.pop(port2, None)
+
+
+def test_onbellek(tmp, port, capture):
+    """Ayni NZB ikinci kez tarandiginda STAT gonderilmez (onbellek)"""
+    nzb_dir = Path(tmp) / 'cache'
+    nzb_dir.mkdir()
+    cache_path = Path(tmp) / 'results.db'
+    content = nzb([f'ok-complete-{i}@test' for i in range(20)])
+    settings = {'check_all_articles': True, 'cache': True, 'cache_path': str(cache_path)}
+
+    (nzb_dir / 'cached.nzb').write_text(content, encoding='utf-8')
+    SEEN['stat'] = 0
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, **settings)))
+    checker.process_nzb_files()
+    assert checker.stats == {'total': 1, 'complete': 1, 'missing': 0, 'error': 0}, checker.stats
+    assert SEEN['stat'] == 20, SEEN['stat']
+
+    (nzb_dir / 'cached.nzb').write_text(content, encoding='utf-8')
+    SEEN['stat'] = 0
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, **settings)))
+    checker.process_nzb_files()
+    assert checker.stats == {'total': 1, 'complete': 1, 'missing': 0, 'error': 0}, checker.stats
+    assert SEEN['stat'] == 0, f'onbellekten okunmaliydi, {SEEN["stat"]} STAT gonderildi'
 
 
 def test_coklu_provider(tmp, port2, port, capture):
@@ -252,12 +356,16 @@ def main():
 
     with tempfile.TemporaryDirectory() as tmp:
         os.chdir(tmp)  # log dosyasi cwd'ye yazilir
-        test_coklu_provider(tmp, port2, port, capture)
         test_siniflandirma(tmp, port, capture)
         test_paralel_tam_tarama(tmp, port, capture)
         test_tam_dosya(tmp, port, capture)
         test_olaylar(tmp, port, capture)
         test_iptal(tmp, port, capture)
+        test_tasima_cakismasi(tmp, port, capture)
+        test_saglayici_hatasi(tmp, port, capture)
+        test_onbellek(tmp, port, capture)
+        test_coklu_provider(tmp, port2, port, capture)
+        test_kademeli_provider(tmp, port2, port, capture)
 
     server.shutdown()
     server2.shutdown()
