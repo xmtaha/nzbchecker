@@ -2,9 +2,8 @@ __pycache__/
 *.py[cod]
 nzb_checker.log
 .codegraph/
-# AppImage çıktıları (release asset olarak yayınlanır, ağaçta tutulmaz)
-/*.AppImage
-!/*.AppImage
+# AppImage'lar release asset olarak yayınlanır
+*.AppImage
 *.egg-info/
 build/
 dist/

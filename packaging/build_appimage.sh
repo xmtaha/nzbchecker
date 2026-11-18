@@ -22,7 +22,6 @@ mkdir -p "$appdir/usr/src"
 cp -r nzb_checker "$appdir/usr/src/nzb_checker"
 find "$appdir/usr/src" -name __pycache__ -type d -exec rm -rf {} +
 cp -r tkdnd "$appdir/usr/src/nzb_checker/gui/tkdnd"
-cp config.json "$appdir/usr/src/config.json" 2>/dev/null || true
 if [ -n "$python_tree" ]; then
     cp packaging/AppRun-bundled "$appdir/AppRun"
     cp -a "$python_tree" "$appdir/usr/python"

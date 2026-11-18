@@ -35,10 +35,7 @@ def ensure_config():
     if CONFIG_PATH.exists():
         return
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    src = Path(__file__).resolve().parent.parent.parent / 'config.json'
-    text = (src.read_text(encoding='utf-8') if src.exists()
-            else json.dumps(DEFAULTS, indent=4, ensure_ascii=False))
-    CONFIG_PATH.write_text(text, encoding='utf-8')
+    CONFIG_PATH.write_text(json.dumps(DEFAULTS, indent=4, ensure_ascii=False), encoding='utf-8')
 
 
 def read_config():

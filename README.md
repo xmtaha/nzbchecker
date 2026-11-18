@@ -25,7 +25,7 @@ python3 --version
 2. Bağımlılık yok - sadece standart kütüphane kullanılır. GUI için tkinter gerekir
    (Debian/Ubuntu'da eksikse: `sudo apt install python3-tk`).
 
-3. GUI'yi açıp ayarları arayüzden girin (**önerilen**), ya da `config.json` dosyasını elle düzenleyin.
+3. GUI'yi açıp ayarları arayüzden girin (**önerilen**), ya da `config.example.json` dosyasını `config.json` olarak kopyalayıp elle düzenleyin.
 
 ### AppImage (paketlenmiş sürüm)
 
@@ -93,11 +93,11 @@ Ayar dosyasının yeri:
 | Kullanım | Dosya |
 |---|---|
 | Masaüstü arayüz (ve AppImage) | `~/.config/nzb_checker/config.json` (ilk açılışta otomatik oluşur) |
-| Komut satırı | `config.json` (betiğin yanında) |
+| Komut satırı | `config.json` (çalıştırma dizininde; `config.example.json` örnek) |
 
 `NZB_CHECKER_CONFIG` ortam değişkeni ile arayüzün kullanacağı dosya değiştirilebilir.
 
-`config.json` dosyasını aşağıdaki şekilde düzenleyin:
+`config.example.json` dosyasını `config.json` olarak kopyalayıp aşağıdaki şekilde düzenleyin:
 
 ```json
 {

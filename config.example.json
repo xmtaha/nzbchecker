@@ -1,5 +1,5 @@
 {
-    "_comment": "providers: istediğiniz kadar Usenet sağlayıcı ekleyin. Her NZB tüm sağlayıcılarda kontrol edilir; segment ancak hiçbirinde yoksa eksik sayılır.",
+    "_comment": "Örnek ayar dosyası. CLI için config.json olarak kopyalayın; GUI/AppImage ayarları ~/.config/nzb_checker/config.json içinde tutar.",
     "providers": [
         {
             "name": "Sağlayıcı 1",
