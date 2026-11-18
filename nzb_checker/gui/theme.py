@@ -39,6 +39,7 @@ CHECK_FIELDS = [
     ('settings', 'timeout', 'Timeout (sn)', int),
     ('settings', 'cache', 'Sonuçları önbellekle', bool),
     ('settings', 'cache_ttl_days', 'Önbellek ömrü (gün)', int),
+    ('settings', 'check_updates', 'Güncellemeleri kontrol et', bool),
     ('settings', 'log_level', 'Log seviyesi', ('DEBUG', 'INFO', 'WARNING', 'ERROR')),
 ]
 SPEC = PATH_FIELDS + CHECK_FIELDS

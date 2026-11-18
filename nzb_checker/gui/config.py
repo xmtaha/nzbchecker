@@ -27,7 +27,9 @@ DEFAULTS = {
               'missing_folder': 'missing', 'error_folder': 'error'},
     'settings': {'check_all_articles': False, 'sample_check_count': 20,
                  'sample_ratio': 0.02, 'timeout': 30, 'cache': True,
-                 'cache_ttl_days': 14, 'log_level': 'INFO'},
+                 'cache_ttl_days': 14, 'check_updates': True,
+                 'update_skipped_version': '', 'update_last_check': 0,
+                 'log_level': 'INFO'},
 }
 
 
@@ -37,6 +39,10 @@ def ensure_config():
         return
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(DEFAULTS, indent=4, ensure_ascii=False), encoding='utf-8')
+    try:
+        os.chmod(CONFIG_PATH, 0o600)
+    except OSError:
+        pass
 
 
 def read_config():
@@ -65,4 +71,8 @@ def write_config(data):
     data.setdefault('_comment', 'NZB Checker ayarları (GUI tarafından yazılır)')
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding='utf-8')
+    try:
+        os.chmod(CONFIG_PATH, 0o600)
+    except OSError:
+        pass
 

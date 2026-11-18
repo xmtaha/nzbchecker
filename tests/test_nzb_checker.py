@@ -8,6 +8,7 @@
 import json
 import logging
 import os
+import socket
 import socketserver
 import sys
 import tempfile
@@ -257,6 +258,7 @@ def test_saglayici_hatasi(tmp, port, capture):
     placed = placed_in(nzb_dir)
     assert placed['complete'] == ['fallback.nzb'], placed
     assert checker.stats == {'total': 1, 'complete': 1, 'missing': 0, 'error': 0}, checker.stats
+    assert checker._provider_ok == [False, True], checker._provider_ok
 
 
 def test_kademeli_provider(tmp, port2, port, capture):
@@ -310,6 +312,124 @@ def test_onbellek(tmp, port, capture):
     checker.process_nzb_files()
     assert checker.stats == {'total': 1, 'complete': 1, 'missing': 0, 'error': 0}, checker.stats
     assert SEEN['stat'] == 0, f'onbellekten okunmaliydi, {SEEN["stat"]} STAT gonderildi'
+
+
+
+def test_guncelleme(tmp, capture):
+    """Release kontrolu: surum karsilastirma, asset secimi, HTTP hatasi"""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from nzb_checker import updater
+
+    class Handler(BaseHTTPRequestHandler):
+        release = {}
+
+        def do_GET(self):
+            payload = json.dumps(self.release).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    Handler.release = {
+        'tag_name': 'v9.9.9',
+        'name': 'Test surumu',
+        'body': 'notlar',
+        'html_url': 'https://example.com/release',
+        'published_at': '2026-01-02T00:00:00Z',
+        'assets': [
+            {'name': 'NZB-Checker-x86_64.AppImage',
+             'browser_download_url': 'https://example.com/a.AppImage', 'size': 1048576},
+            {'name': 'NZB-Checker-bundled-x86_64.AppImage',
+             'browser_download_url': 'https://example.com/b.AppImage', 'size': 10485760},
+        ],
+    }
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f'http://127.0.0.1:{server.server_address[1]}/latest'
+    try:
+        assert updater.is_newer('1.3.0', 'v1.4.0')
+        assert not updater.is_newer('1.4.0', 'v1.4.0')
+        assert updater.is_newer('1.4.0-beta1', '1.4.0')
+        assert not updater.is_newer('1.4.0', '1.4.0-beta1')
+
+        info = updater.check_for_update('1.4.0', api_url=url, timeout=5)
+        assert info and info['version'] == '9.9.9', info
+        assert info['current'] == '1.4.0', info
+        assert updater.pick_asset(info['assets'])['name'] == 'NZB-Checker-x86_64.AppImage'
+        bundled = updater.pick_asset(info['assets'], 'NZB-Checker-bundled-x86_64.AppImage')
+        assert bundled['name'] == 'NZB-Checker-bundled-x86_64.AppImage', bundled
+
+        Handler.release = dict(Handler.release, tag_name='v1.4.0')
+        assert updater.check_for_update('1.4.0', api_url=url, timeout=5) is None
+
+        dead = socket.socket()
+        dead.bind(('127.0.0.1', 0))
+        dead_port = dead.getsockname()[1]
+        dead.close()
+        try:
+            updater.fetch_latest_release(f'http://127.0.0.1:{dead_port}/latest', timeout=3)
+        except updater.UpdateError:
+            pass
+        else:
+            raise AssertionError('baglanti hatasi UpdateError uretmeliydi')
+    finally:
+        server.shutdown()
+
+
+
+def test_config_hatasi(tmp, capture):
+    """Eksik/bozuk config veya saglayicisiz ayar ConfigError firlatir (sys.exit yok)"""
+    from nzb_checker.engine import ConfigError
+
+    def expect_config_error(config_path):
+        try:
+            NZBChecker(str(config_path))
+        except ConfigError:
+            return
+        raise AssertionError(f'ConfigError bekleniyordu: {config_path}')
+
+    expect_config_error(Path(tmp) / 'yok.json')
+    bad = Path(tmp) / 'bozuk.json'
+    bad.write_text('{', encoding='utf-8')
+    expect_config_error(bad)
+
+    empty = Path(tmp) / 'saglayicisiz.json'
+    empty.write_text(json.dumps({
+        'providers': [],
+        'paths': {'nzb_folder': str(Path(tmp) / 'bos'), 'complete_folder': 'complete',
+                  'missing_folder': 'missing', 'error_folder': 'error'},
+    }), encoding='utf-8')
+    expect_config_error(empty)
+
+
+def test_rapor(tmp, port, capture):
+    """export_report: CSV ve eksik-segment listeleri yazilir"""
+    nzb_dir = Path(tmp) / 'report'
+    nzb_dir.mkdir()
+    (nzb_dir / 'tam.nzb').write_text(
+        nzb([f'ok-complete-{i}@test' for i in range(20)]), encoding='utf-8')
+    (nzb_dir / 'eksik.nzb').write_text(
+        nzb(['ok-m1@test', 'gone-x@test', 'ok-m2@test']), encoding='utf-8')
+
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, check_all_articles=True)))
+    checker.process_nzb_files()
+
+    out = Path(tmp) / 'rapor-cikti'
+    info = checker.export_report(out)
+    assert info['files'] == 2 and info['missing_files'] == 1, info
+    assert info['missing_ids'] == 1, info
+
+    csv_text = (out / 'rapor.csv').read_text(encoding='utf-8-sig').replace('\r', '')
+    assert 'eksik.nzb,missing,3,3,1' in csv_text, csv_text
+    assert 'tam.nzb,complete,20,20,0' in csv_text, csv_text
+
+    ids = (out / 'eksik-segmentler' / 'eksik.nzb.txt').read_text(
+        encoding='utf-8').split()
+    assert ids == ['gone-x@test'], ids
 
 
 def test_coklu_provider(tmp, port2, port, capture):
@@ -366,6 +486,9 @@ def main():
         test_onbellek(tmp, port, capture)
         test_coklu_provider(tmp, port2, port, capture)
         test_kademeli_provider(tmp, port2, port, capture)
+        test_guncelleme(tmp, capture)
+        test_config_hatasi(tmp, capture)
+        test_rapor(tmp, port, capture)
 
     server.shutdown()
     server2.shutdown()

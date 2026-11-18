@@ -10,12 +10,15 @@ NZB dosyalarını Usenet sunucusunda kontrol eden ve eksik parçalara göre otom
 -  **Kademeli sağlayıcı taraması**: her segment her sağlayıcıya değil, yalnızca öncekilerin
    bulamadığı segmentler sonraki sağlayıcıya sorulur
 -  **Sonuç önbelleği (SQLite)**: tekrar taramalarda aynı segment için STAT gönderilmez
+-  **Ön uçuş kontrolü**: başlamadan önce her sağlayıcıya tek bağlantı denenir; erişilemeyen atlanır
+-  **Rapor**: CSV özeti + eksik segment (message-id) listeleri dışa aktarılır
 -  Eksik parçaları tespit etme
 -  Otomatik klasörleme (tam/eksik/hatalı)
 -  Detaylı log kaydı
 -  Config dosyası ile kolay yapılandırma
 -  Örnek kontrol veya tam kontrol seçeneği
 -  **Masaüstü arayüz (GUI)**: tüm ayarlar arayüzden, binlerce dosya tek seferde
+-  **Otomatik güncelleme kontrolü**: yeni release varsa bildirim (indirmeyi kullanıcı yapar)
 -  Python 3.9+ uyumlu (yalnızca standart kütüphane)
 
 ## Kurulum
@@ -44,6 +47,9 @@ Sistemdeki `python3` + `tkinter` kullanılır (yoksa uyarı gösterir:
 `sudo apt install python3-tk`). Python paket içine gömülmez, bu yüzden dosya ~1 MB'dir.
 
 Yeniden üretmek için: `./packaging/build_appimage.sh` (appimagetool'u gerekirse indirir).
+
+Güncelleme: yeni sürüm bildirimi geldiğinde AppImage'i tarayıcıdan indirip mevcut dosyanın
+yerine koyun. Uygulama dosyayı kendisi indirmez veya değiştirmez.
 
 Sürükle-bırak için `tkdnd/` klasöründeki Tcl paketi kullanılır (derlemede `nzb_checker/gui/tkdnd` içine kopyalanır) (tkdnd 2.9.5, Tcl 9 uyumlu).
 Paket repoda hazır durur, ayrıca kurulum gerekmez; ayrıntı için `tkdnd/NOTICE.txt`.
@@ -129,6 +135,7 @@ Ayar dosyasının yeri:
         "timeout": 30,                    // Bağlantı timeout (saniye)
         "cache": true,                    // Sonuçları SQLite önbelleğinde tut
         "cache_ttl_days": 14,             // Önbellek kaydı ömrü (gün)
+        "check_updates": true,            // Açılışta yeni sürüm kontrolü
         "log_level": "INFO"               // Log seviyesi: DEBUG, INFO, WARNING, ERROR
     }
 }
@@ -137,6 +144,22 @@ Ayar dosyasının yeri:
 Önbellek dosyası varsayılan olarak `~/.cache/nzb_checker/cache.db`
 (veya `$XDG_CACHE_HOME/nzb_checker/cache.db`) konumundadır. `NZB_CHECKER_CACHE` ortam
 değişkeni ya da `settings.cache_path` ile değiştirilebilir; `cache: false` ile kapatılır.
+
+## Güncellemeler
+
+Arayüz açılışta GitHub'daki en son release'i kontrol eder (`api.github.com`,
+`xmtaha/nzbchecker`). Kontrol:
+
+- en fazla **20 saatte bir** yapılır (elle kontrol için Ayarlar > **Güncellemeleri kontrol et**)
+- `check_updates: false` ile kapatılabilir
+- ağ yoksa veya GitHub'a erişilemezse sessizce atlanır (tarama etkilenmez)
+
+Yeni sürüm varsa sürüm notlarını, yayın tarihini ve mevcut AppImage yolunu gösteren
+bloklamayan bir pencere açılır (tarama sırasında olaylar akmaya devam eder).
+Kaynaktan çalıştırıyorsanız pencere sürüm sayfasına yönlendirir. **Uygulama güncellemeyi indirmez, dosya değiştirmez**: "AppImage'i indir"
+düğmesi bağlantıyı yalnızca tarayıcıda açar; indirdikten sonra mevcut dosyanın yerine siz
+koyarsınız. "Bu sürümü bir daha gösterme" ile sürüm atlanabilir
+(`settings.update_skipped_version` olarak saklanır).
 
 ## Kullanım
 
@@ -161,6 +184,8 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
 - **Başlat / Durdur**: tarama arka planda çalışır, arayüz donmaz. Durdur, o an işlenen
   dosyaları `cancelled` olarak işaretler ve **dosyaları taşımaz** - sonraki çalıştırmada
   tekrar denenir
+- **Güncelleme bildirimi**: açılışta GitHub release'leri kontrol edilir; yeni sürüm varsa
+  sürüm notlarıyla (bloklamayan) bir pencere açılır. İndirme/yer değiştirme yapılmaz
 - Canlı durum tablosu (tam/eksik/hatalı, segment/kontrol/eksik sayıları, **Eksik %** tahmini, süre),
   "Sadece eksik/hatalı" filtresi ve arama kutusu
 - **Sağlayıcı bazlı sonuç**: tablodaki **Sağlayıcılar** kolonu her dosya için hangi sağlayıcının tam
@@ -171,6 +196,9 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
   ve ayrıntı log'a yazılır (`Frugal: tam · Eweka: %3.2 eksik (12 segment)`)
 - **Canlı ilerleme**: büyük bir NZB taranırken satırdaki kontrol sayısı ve durum çubuğu
   segment ilerlemesini gösterir
+- **Raporu dışa aktar**: Dosyalar sekmesindeki düğme seçilen klasöre `rapor.csv` ve
+  `eksik-segmentler/<nzb>.txt` (satır başına bir message-id) yazar; eksik arşivleri
+  yeniden indirmek veya elle onarmak için kullanılır
 - Ölçek testi: 2.000 dosya x 20 segment (40.000 STAT), 50 bağlantı -> ~3 sn (yerel sunucu)
 
 ### Komut satırı:
@@ -187,7 +215,10 @@ python3 tests/test_nzb_checker.py
 ## Nasıl Çalışır?
 
 1. **NZB Tarama**: Belirtilen klasördeki tüm `.nzb` dosyalarını bulur
-2. **Paralel ve kademeli işlem**: `connections` kadar bağlantı açılır. Hem birden fazla NZB
+2. **Ön uçuş**: her sağlayıcıya tek bağlantıyla erişim denenir. Bağlanılamayan sağlayıcı
+   o taramada hiç kullanılmaz (her segmentte yeniden bağlanma denemesi olmaz). Hiçbir
+   sağlayıcıya erişilemezse dosyalar taşınmadan tarama durur ve hata bildirilir
+3. **Paralel ve kademeli işlem**: `connections` kadar bağlantı açılır. Hem birden fazla NZB
    paralel işlenir hem de **tek bir NZB'nin segmentleri bu bağlantılara bölünür** — 20.000
    segmentlik dosya bile tüm bağlantıları kullanır. Sağlayıcılar sırayla taranır: P1'in
    bulamadığı segmentler P2'ye, P2'nin bulamadıkları P3'e sorulur. Böylece sağlam dosyalarda
@@ -195,13 +226,13 @@ python3 tests/test_nzb_checker.py
    (dosya başına yeniden el sıkışma yok). Önbellekte taze kaydı olan segment hiç sorulmaz.
    Bir sağlayıcı tamamen çökerse tarama diğerleriyle sürer; ancak **hiçbir** sağlayıcı
    taranamadıysa dosya `error/`'a gider
-3. **Parse**: Her NZB dosyasını parse eder ve segment bilgilerini çıkarır
-4. **Kontrol**: 
+4. **Parse**: Her NZB dosyasını parse eder ve segment bilgilerini çıkarır
+5. **Kontrol**: 
    - `check_all_articles=false`: Örnek segmentleri kontrol eder (hızlı).
      Kontrol edilen segment sayısı = `max(sample_check_count, toplam × sample_ratio)`,
      dosyaya eşit yayılır (ilk ve son segment dahil)
    - `check_all_articles=true`: Tüm segmentleri kontrol eder (yavaş ama kesin)
-5. **Sınıflandırma**:
+6. **Sınıflandırma**:
    - **complete/**: Eksik segment olmayan dosyalar
    - **missing/**: Eksik segmentli dosyalar
    - **error/**: Parse edilemeyen veya hiçbir sağlayıcıda taranamayan dosyalar

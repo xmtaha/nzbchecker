@@ -1,7 +1,7 @@
 """Komut satırı giriş noktası."""
 import sys
 
-from .checker import NZBChecker
+from .checker import ConfigError, NZBChecker
 
 
 def main(argv=None):
@@ -19,6 +19,9 @@ def main(argv=None):
     except KeyboardInterrupt:
         print("\n\nİşlem kullanıcı tarafından durduruldu.")
         sys.exit(0)
+    except ConfigError as e:
+        print(f"\nHata: {e}")
+        sys.exit(2)
     except Exception as e:
         print(f"\nFatal hata: {e}")
         sys.exit(1)

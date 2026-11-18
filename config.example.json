@@ -24,6 +24,7 @@
         "timeout": 30,
         "cache": true,
         "cache_ttl_days": 14,
+        "check_updates": true,
         "log_level": "INFO"
     }
 }

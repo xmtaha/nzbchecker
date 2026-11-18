@@ -17,11 +17,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, ttk
 
-from nzb_checker.engine import NZBChecker, connect_to_server
+from nzb_checker.engine import ConfigError, NZBChecker, connect_to_server
+from nzb_checker import __version__
+from nzb_checker.updater import UpdateError, check_for_update
 
 from .config import (CONFIG_PATH, DEFAULTS, DEFAULT_PROVIDER, STATUS_TEXT,
                      VISIBLE_WHEN_FILTERED, read_config, write_config)
-from .dialogs import open_provider_dialog
+from .dialogs import open_provider_dialog, open_update_dialog
 from .theme import (ACCENT, ACCENT_DARK, AMBER, BG, BORDER, GREEN, MUTED, RED,
                     SPEC, STATUS_COLOR, SURFACE, SURFACE_2, SURFACE_3, TEXT,
                     PATH_FIELDS, CHECK_FIELDS, pick_font)
@@ -49,6 +51,8 @@ class App(tk.Tk):
         self.listed = 0
         self.checker = None
         self.worker = None
+        self.update_running = False
+        self.update_dialog = None
 
         self.config_data = read_config()
         self.nzb_folder = str(self.config_data.get('paths', {}).get('nzb_folder') or '')
@@ -65,6 +69,7 @@ class App(tk.Tk):
         self.bind('<Escape>', lambda _e: self.stop())
         self.bind('<Control-s>', lambda _e: self._save_clicked())
         self.after(120, self._drain)
+        self.after(900, self._check_updates_async)
 
     # ------------------------------------------------------------- stil
 
@@ -239,6 +244,9 @@ class App(tk.Tk):
         entry.pack(side='left', padx=(6, 0), ipady=4)
         entry.bind('<KeyRelease>', lambda _e: self._apply_filter())
 
+        self._button(bar, 'Raporu dışa aktar', self.export_report).pack(
+            side='left', padx=(12, 0))
+
         self.count_label = tk.Label(bar, text='0 dosya', bg=SURFACE, fg=MUTED,
                                     font=(self.ui_font, 9))
         self.count_label.pack(side='right')
@@ -286,11 +294,14 @@ class App(tk.Tk):
         footer = tk.Frame(self.settings_tab, bg=SURFACE, padx=12)
         footer.pack(fill='x', pady=(0, 12))
         self._button(footer, 'Ayarları kaydet', self._save_clicked, primary=True).pack(side='left')
+        self._button(footer, 'Güncellemeleri kontrol et',
+                     lambda: self._check_updates_async(force=True)).pack(
+            side='left', padx=(8, 0))
         self.save_hint = tk.Label(footer, text='Değişiklikler config.json dosyasına yazılır',
                                   bg=SURFACE, fg=MUTED, font=(self.ui_font, 9))
         self.save_hint.pack(side='left', padx=10)
 
-        tk.Label(footer, text='F5 başlat  ·  Esc durdur  ·  Ctrl+S kaydet',
+        tk.Label(footer, text=f'v{__version__}  ·  F5 başlat  ·  Esc durdur  ·  Ctrl+S kaydet',
                  bg=SURFACE, fg=MUTED, font=(self.ui_font, 9)).pack(side='right')
 
 
@@ -523,6 +534,7 @@ class App(tk.Tk):
         if self.nzb_folder:
             data.setdefault('paths', {})['nzb_folder'] = self.nzb_folder
         write_config(data)
+        self.config_data = data
 
     def _save_clicked(self):
         try:
@@ -532,6 +544,82 @@ class App(tk.Tk):
             return
         self.save_hint.config(text=f'Kaydedildi: {CONFIG_PATH}', fg=GREEN)
         self.summary_label.config(text=f'Ayarlar kaydedildi: {CONFIG_PATH}')
+
+    # ------------------------------------------------------------- güncelleme
+
+    UPDATE_INTERVAL = 20 * 3600  # saniye: otomatik kontrol sıklığı
+
+    def _running_appimage(self) -> str:
+        """AppImage içinden çalışıyorsa dosya yolu, değilse boş"""
+        return os.environ.get('APPIMAGE') or ''
+
+    def _check_updates_async(self, force: bool = False):
+        """Release kontrolünü arka planda başlat (ağ beklemesi arayüzü durdurmaz)"""
+        if self.update_running:
+            if force:
+                self._log('INFO', 'Sürüm kontrolü zaten çalışıyor')
+            return
+        if self.update_dialog is not None and force:
+            self._log('INFO', 'Güncelleme penceresi zaten açık')
+            return
+        settings = self.config_data.get('settings') or {}
+        if not force:
+            if not settings.get('check_updates', True):
+                return
+            try:
+                last = float(settings.get('update_last_check') or 0)
+            except (TypeError, ValueError):
+                last = 0.0
+            if time.time() - last < self.UPDATE_INTERVAL:
+                return
+        if force:
+            self.summary_label.config(text='Sürüm kontrol ediliyor…')
+        self.update_running = True
+        threading.Thread(target=self._update_worker, args=(force,), daemon=True).start()
+
+    def _update_worker(self, force: bool):
+        try:
+            release = check_for_update()
+        except UpdateError as exc:
+            self.q.put(('update_done', {'error': str(exc), 'forced': force}))
+            return
+        except Exception as exc:  # beklenmeyen hata kilidi bırakmasın
+            self.q.put(('update_done', {'error': str(exc), 'forced': force}))
+            return
+        self.q.put(('update_done', {'release': release, 'forced': force}))
+
+    def _record_update_state(self, key: str, value):
+        """Güncelleme durumunu (son kontrol / atlanan sürüm) config'e yaz"""
+        data = read_config()
+        data.setdefault('settings', {})[key] = value
+        try:
+            write_config(data)
+        except Exception as exc:
+            logging.getLogger(__name__).debug('Güncelleme durumu yazılamadı: %s', exc)
+
+    def _show_update(self, release: dict):
+        settings = self.config_data.get('settings') or {}
+        version = release.get('version') or ''
+        if version and version == (settings.get('update_skipped_version') or ''):
+            return
+        if self.update_dialog is not None:
+            return
+        self._log('INFO', f"Yeni sürüm mevcut: v{version} (şu an v{__version__})")
+        path = self._running_appimage()
+        # bloklamayan pencere: tarama olayları akmaya devam eder
+        self.update_dialog = open_update_dialog(
+            self, release,
+            running_name=Path(path).name if path else '',
+            running_path=path,
+            on_close=self._on_update_dialog_closed)
+
+    def _on_update_dialog_closed(self, result: dict):
+        self.update_dialog = None
+        if not result.get('skip'):
+            return
+        version = result.get('version') or ''
+        self._record_update_state('update_skipped_version', version)
+        self.config_data.setdefault('settings', {})['update_skipped_version'] = version
 
     # ------------------------------------------------------------- satır işlemleri
 
@@ -708,13 +796,25 @@ class App(tk.Tk):
             return
 
         self._clear_rows()
+        self._scan_started_at = None
+        self._scan_checked = 0
+        self._scan_total_to_check = 0
         self.start_btn.config(state='disabled')
         self.stop_btn.config(state='normal', fg=TEXT)
         self.summary_label.config(text='Tarama başlıyor…')
         self._set_status('Çalışıyor', ACCENT)
         self.notebook.select(0)
 
-        self.checker = NZBChecker(str(CONFIG_PATH), events=self._on_event)
+        self.checker = None
+        try:
+            self.checker = NZBChecker(str(CONFIG_PATH), events=self._on_event)
+        except ConfigError as exc:
+            messagebox.showerror('Ayarlar', str(exc))
+            self.start_btn.config(state='normal')
+            self.stop_btn.config(state='disabled', fg='#5b6270')
+            self.summary_label.config(text='Tarama başlatılamadı')
+            self._set_status('Hazır', MUTED)
+            return
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
 
@@ -723,6 +823,27 @@ class App(tk.Tk):
             self.checker.cancel()
             self.summary_label.config(text='Durduruluyor…')
             self._set_status('Durduruluyor', AMBER)
+
+    def export_report(self):
+        """Son taramanın raporunu (CSV + eksik segment listeleri) dışa aktar"""
+        checker = self.checker
+        if not checker or not getattr(checker, 'results', None):
+            messagebox.showinfo('Rapor', 'Önce bir tarama çalıştırın.')
+            return
+        folder = filedialog.askdirectory(
+            initialdir=self.nzb_folder or str(Path.home()),
+            title='Rapor klasörü seç')
+        if not folder:
+            return
+        try:
+            info = checker.export_report(Path(folder))
+        except Exception as exc:
+            messagebox.showerror('Rapor', f'Rapor yazılamadı: {exc}')
+            return
+        self._log('INFO', f"Rapor yazıldı: {info['csv']} "
+                          f"({info['files']} dosya, {info['missing_files']} eksik dosya, "
+                          f"{info['missing_ids']} eksik segment)")
+        self.summary_label.config(text=f"Rapor: {info['folder']}")
 
     def _run(self):
         try:
@@ -751,9 +872,15 @@ class App(tk.Tk):
         if kind == 'scan_start':
             self.progress['maximum'] = max(1, data.get('total') or 1)
             self.progress['value'] = 0
+            self._scan_started_at = data.get('started') or time.time()
+            self._scan_checked = 0
+            self._scan_total_to_check = 0
 
         elif kind == 'file_start':
-            self._upsert(data['name'], 'running', segments=data.get('segments', 0))
+            to_check = data.get('to_check') or 0
+            self._scan_total_to_check = getattr(self, '_scan_total_to_check', 0) + to_check
+            self._upsert(data['name'], 'running', segments=data.get('segments', 0),
+                         checked=0, missing=0)
             self._set_status('Kontrol ediliyor', ACCENT)
 
         elif kind == 'file_progress':
@@ -762,7 +889,21 @@ class App(tk.Tk):
             self._upsert(data['name'], 'running', checked=checked,
                          segments=data.get('segments'))
             percent = 100.0 * checked / to_check if to_check else 0.0
-            self._set_status(f'Kontrol ediliyor — %{percent:.0f}', ACCENT)
+            scan_checked = data.get('scan_checked')
+            if scan_checked is not None:
+                self._scan_checked = scan_checked
+            elapsed = data.get('elapsed') or 0.0
+            speed = (self._scan_checked / elapsed) if elapsed > 0 else 0.0
+            parts = [f'%{percent:.0f}']
+            if speed > 0:
+                parts.append(f'{speed:.1f} seg/sn')
+                remaining = max(0, getattr(self, '_scan_total_to_check', 0) - self._scan_checked)
+                if remaining > 0:
+                    eta = int(remaining / speed)
+                    m, s = divmod(eta, 60)
+                    h, m = divmod(m, 60)
+                    parts.append(f'ETA {h:d}:{m:02d}:{s:02d}' if h else f'ETA {m:d}:{s:02d}')
+            self._set_status('Kontrol ediliyor — ' + ' · '.join(parts), ACCENT)
 
         elif kind == 'file_done':
             status = data.get('status', 'error')
@@ -791,14 +932,41 @@ class App(tk.Tk):
 
         elif kind == 'scan_end':
             self.progress['value'] = self.progress['maximum']
+            error = data.get('error')
+            if error:
+                self._log('ERROR', error)
+                self.summary_label.config(text=error)
+                self._set_status('Hata', RED)
+                self.start_btn.config(state='normal')
+                self.stop_btn.config(state='disabled', fg='#5b6270')
+                messagebox.showerror('Tarama', error)
+                return
             cancelled = data.get('cancelled')
             moved_failed = data.get('move_failed') or 0
-            summary = (f"{'Durduruldu' if cancelled else 'Bitti'} — "
-                       f"Tam: {data.get('complete', 0)}, Eksik: {data.get('missing', 0)}, "
-                       f"Hatalı: {data.get('error', 0)}")
+            elapsed = data.get('elapsed')
+            missing_segs = data.get('missing_segments')
+            prefix = 'Durduruldu' if cancelled else 'Bitti'
+            if elapsed is not None:
+                prefix += f" — {elapsed} sn"
+            summary = (f"{prefix} — Tam: {data.get('complete', 0)}, "
+                       f"Eksik: {data.get('missing', 0)}")
+            if missing_segs is not None:
+                summary += f" ({missing_segs} segment)"
+            summary += f", Hatalı: {data.get('error', 0)}"
             if moved_failed:
-                summary += f", Taşınamayan: {moved_failed}"
-                self._log('WARNING', f'{moved_failed} dosya hedef klasöre taşınamadı')
+                summary += f", Taşınamayan: {moved_failed} (kaynakta kaldı)"
+                self._log('WARNING', f'{moved_failed} dosya hedef klasöre taşınamadı (kaynakta bırakıldı)')
+            provider_stats = data.get('provider_stats') or []
+            if provider_stats:
+                parts = []
+                for p in provider_stats:
+                    part = f"{p['name']} {p.get('stat', 0)} STAT, {p.get('cache', 0)} önbellek"
+                    if p.get('errors'):
+                        part += f", {p['errors']} hata"
+                    if not p.get('active', True):
+                        part += " (erişilemedi)"
+                    parts.append(part)
+                self._log('INFO', 'Sağlayıcı istekleri: ' + '; '.join(parts))
             self.summary_label.config(text=summary)
             self._set_status('Durduruldu' if cancelled else 'Bitti', AMBER if cancelled else GREEN)
             self.start_btn.config(state='normal')
@@ -817,6 +985,20 @@ class App(tk.Tk):
             label = data['label']
             if label.winfo_exists():
                 label.config(text=data['text'], fg=data['color'])
+
+        elif kind == 'update_done':
+            self.update_running = False
+            if data.get('error'):
+                if data.get('forced'):
+                    self._log('WARNING', f"Sürüm kontrolü başarısız: {data['error']}")
+                return
+            self._record_update_state('update_last_check', time.time())
+            release = data.get('release')
+            if release:
+                self._show_update(release)
+            elif data.get('forced'):
+                self._log('INFO', f'Sürüm güncel: v{__version__}')
+
         elif kind == 'log':
             self._log(data.get('level', 'INFO'), data.get('message', ''))
 
