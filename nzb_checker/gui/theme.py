@@ -39,7 +39,6 @@ PATH_FIELDS = [
 ]
 CHECK_FIELDS = [
     ('settings', 'check_all_articles', 'Tüm segmentleri kontrol et', bool),
-    ('settings', 'auto_escalate', 'Örnekte eksik çıkarsa tam tara', bool),
     ('settings', 'sample_check_count', 'En az örnek segment', int),
     ('settings', 'sample_ratio', 'Örnek oranı (0.02 = %2)', float),
     ('settings', 'timeout', 'Timeout (sn)', int),

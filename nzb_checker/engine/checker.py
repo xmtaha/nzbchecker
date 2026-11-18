@@ -100,7 +100,6 @@ class NZBChecker:
         self.results: List[Dict] = []
         settings = self.config.get('settings', {})
         self.check_all = bool(settings.get('check_all_articles', False))
-        self.auto_escalate = bool(settings.get('auto_escalate', False))
         self.sample_count = max(1, int(settings.get('sample_check_count', 20)))
         self.sample_ratio = float(settings.get('sample_ratio', 0.02))
         self.timeout = settings.get('timeout', 30)
@@ -481,7 +480,6 @@ class NZBChecker:
             'total': len(segments),
             'ids': [s['message_id'] for s in targets],
             'all_ids': [s['message_id'] for s in segments],
-            'escalated': False,      # örnek tarama tam taramaya yükseltildi mi
             'found': set(),          # herhangi bir sağlayıcının bulduğu id'ler
             'answered': set(),       # en az bir sağlayıcının yanıtladığı id'ler
             'stage': 0,              # sıradaki provider
@@ -512,8 +510,6 @@ class NZBChecker:
                 self._finish_file(nzb_path, state)
                 return
             if state['stage'] >= len(self.providers):
-                if self._escalate(nzb_path, state):
-                    continue
                 self._finish_file(nzb_path, state)
                 return
 
@@ -556,43 +552,6 @@ class NZBChecker:
             else:
                 state['done'].add(index)
         self._start_next_stage(executor, nzb_path, state, futures)
-
-    def _escalate(self, nzb_path: Path, state: Dict) -> bool:
-        """
-        Örnek taramada eksik görülen dosyayı tam taramaya yükseltir.
-
-        'auto_escalate' ayarı kapalıysa (varsayılan) yükseltme yapılmaz: örnek
-        tarama sonucu olduğu gibi raporlanır. Açıksa örnekte tek bir eksik bile
-        şüpheli sayılır ve dosya tam taranır. Yükseltme bir kez yapılır.
-
-        Returns:
-            True ise aşamalar baştan kuruldu, tarama devam etmeli
-        """
-        if self.check_all or not self.auto_escalate or state['escalated']:
-            return False
-        # örnekte hiç eksik yoksa yükseltmeye gerek yok (zaten "Tam")
-        if all(mid in state['found'] for mid in state['ids']):
-            return False
-        rest = [mid for mid in state['all_ids'] if mid not in state['ids']]
-        if not rest:  # zaten tüm segmentler taranmış (örnek = tam)
-            state['escalated'] = True
-            return False
-        if not any(self._provider_ok):
-            return False
-        self.logger.info(
-            f"{nzb_path.name}: örnekte eksik segment görüldü, tam taramaya geçildi "
-            f"({len(rest)} ek segment)")
-        state['escalated'] = True
-        state['ids'] = list(state['all_ids'])
-        state['stage'] = 0
-        state['active'] = None
-        state['left'] = 0
-        state['stage_checked'] = set()
-        state['stage_missing'] = set()
-        state['stage_failed'] = False
-        state['done'] = set()
-        state['providers'] = {}
-        return True
 
     def _finish_file(self, nzb_path: Path, state: Dict):
         """
@@ -654,8 +613,7 @@ class NZBChecker:
         status = 'complete' if estimated_missing == 0 else 'missing'
         missing_ids = sorted(mid for mid in ids if mid not in state['found'])
         self._classify(nzb_path, status, total, estimated_missing, answered, started,
-                       percent, summary(), missing_ids=missing_ids,
-                       checked_all=self.check_all or state['escalated'])
+                       percent, summary(), missing_ids=missing_ids)
 
     def process_nzb_files(self):
         """

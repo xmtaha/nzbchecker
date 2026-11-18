@@ -159,45 +159,6 @@ def test_paralel_tam_tarama(tmp, port, capture):
     assert any('50/300' in m for m in capture.messages), capture.messages[-5:]
 
 
-def test_yukseltme(tmp, port, capture):
-    """auto_escalate acikken ornekte eksik gorulurse dosya tam taranir"""
-    nzb_dir = Path(tmp) / 'escalate'
-    nzb_dir.mkdir()
-    (nzb_dir / 'esc.nzb').write_text(nzb(ESC_IDS), encoding='utf-8')
-
-    SEEN['stat'] = 0
-    checker = NZBChecker(str(write_config(tmp, nzb_dir, port, auto_escalate=True)))
-    checker.process_nzb_files()
-
-    assert placed_in(nzb_dir)['missing'] == ['esc.nzb'], placed_in(nzb_dir)
-    item = checker.results[0]
-    assert item['checked_all'] is True, item
-    assert item['checked'] == 100 and item['missing'] == 4, item
-    assert item['percent'] == 4.0, item
-    assert len(item['missing_ids']) == 4, item['missing_ids']
-    # 20 ornek + yukseltmede kalan 81 (bulunanlar tekrar sorulmaz)
-    assert SEEN['stat'] == 101, f'beklenen 101 STAT, gelen {SEEN["stat"]}'
-    assert any('tam taramaya' in m for m in capture.messages), capture.messages[-5:]
-
-
-def test_yukseltme_kapali(tmp, port, capture):
-    """auto_escalate kapaliyken (varsayilan) ornek tarama tam taramaya yukseltilmez"""
-    nzb_dir = Path(tmp) / 'no-escalate'
-    nzb_dir.mkdir()
-    (nzb_dir / 'esc.nzb').write_text(nzb(ESC_IDS), encoding='utf-8')
-
-    SEEN['stat'] = 0
-    checker = NZBChecker(str(write_config(tmp, nzb_dir, port)))
-    checker.process_nzb_files()
-
-    assert placed_in(nzb_dir)['missing'] == ['esc.nzb'], placed_in(nzb_dir)
-    item = checker.results[0]
-    assert item['checked_all'] is False, item
-    assert item['checked'] == 20, item
-    assert SEEN['stat'] == 20, f'yukseltme olmamali, gelen {SEEN["stat"]} STAT'
-    assert not any('tam taramaya' in m for m in capture.messages)
-
-
 def test_ornek_rozeti(tmp, port, capture):
     """Ornekte eksik yoksa tam tarama yapilmaz, satir 'ornek' olarak isaretlenir"""
     nzb_dir = Path(tmp) / 'sample'
