@@ -119,8 +119,9 @@ timeout, log seviyesi) ve **Ayarları kaydet** ile `~/.config/nzb_checker/config
 - **Sürükle-bırak**: NZB klasörünü pencereye sürükleyip bırakın; klasör hemen ayarlanır ve taranır
   (tkdnd Tcl paketi gerekir - repodaki `tkdnd/` klasöründe gelir, AppImage içinde de vardır).
   Paket yoksa arayüz çalışmaya devam eder, **Klasör seç** düğmesi kullanılır
-- **Çoklu sağlayıcı**: Ayarlar > Usenet sağlayıcıları bölümünde **+ Ekle** ile istediğiniz kadar
-  sağlayıcı tanımlayın. Her NZB **tüm sağlayıcılarda** kontrol edilir; bir segment ancak
+- **Çoklu sağlayıcı**: Ayarlar > Usenet sağlayıcıları listesinde **+ Ekle** ile istediğiniz kadar
+  sağlayıcı tanımlayın (ekleme/düzenleme ayrı pencerede açılır; satıra çift tıklayarak düzenlenir).
+  **Bağlantıyı test et** düğmesi hem pencere içinde hem listede çalışır. Her NZB **tüm sağlayıcılarda** kontrol edilir; bir segment ancak
   **hiçbir sağlayıcıda bulunamazsa** eksik sayılır (biri bulursa dosya tamdır). Bağlantı sayıları
   toplanır: 2 sağlayıcı x 30 = 60 paralel bağlantı
 - **Klasörü tara**: klasördeki tüm `.nzb` dosyalarını listeler (binlerce dosya sorunsuz;

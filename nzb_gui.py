@@ -12,12 +12,14 @@ import logging
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 
 import tkinter as tk
 from tkinter import filedialog, font, messagebox, ttk
 
 from nzb_checker import NZBChecker
+from nzb_checker import connect_to_server
 
 # Ayar dosyası: NZB_CHECKER_CONFIG > ~/.config/nzb_checker/config.json
 # (AppImage salt okunur olduğu için script klasörüne yazılamaz)
@@ -109,6 +111,27 @@ def pick_font(*names):
         if name in available:
             return name
     return 'TkDefaultFont'
+
+
+def provider_from_vars(vars_, fields=PROVIDER_FIELDS):
+    """Form değişkenlerini provider sözlüğüne çevirir"""
+    item = {}
+    for key, label, kind in fields:
+        raw = vars_[key].get()
+        if kind is bool:
+            item[key] = bool(raw)
+        elif kind is int:
+            try:
+                item[key] = int(float(str(raw).strip().replace(',', '.')))
+            except ValueError:
+                raise ValueError(f'{label}: sayı bekleniyor ({raw!r})')
+        else:
+            item[key] = str(raw).strip()
+    if not item['host']:
+        raise ValueError('Sunucu adresi boş')
+    if not item['name']:
+        item['name'] = item['host']
+    return item
 
 
 class QueueLogHandler(logging.Handler):
@@ -361,89 +384,6 @@ class App(tk.Tk):
         self._field_group(wrap, 'Klasörler', 1, PATH_FIELDS)
         self._field_group(wrap, 'Kontrol', 2, CHECK_FIELDS)
 
-    def _build_providers(self, parent):
-        """Provider listesi: kullanıcı istediği kadar ekleyip silebilir"""
-        group = tk.Frame(parent, bg=SURFACE, highlightthickness=1,
-                         highlightbackground=BORDER, padx=14, pady=12)
-        group.grid(row=0, column=0, sticky='nsew', padx=(0, 12))
-
-        tk.Label(group, text='Usenet sağlayıcıları', bg=SURFACE, fg=TEXT,
-                 font=(self.ui_font, 11, 'bold')).grid(row=0, column=0, sticky='w')
-        self._button(group, '+ Ekle', self.add_provider).grid(row=0, column=1, sticky='e')
-        group.columnconfigure(0, weight=1)
-
-        self.provider_box = tk.Frame(group, bg=SURFACE)
-        self.provider_box.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(10, 0))
-        group.rowconfigure(1, weight=1)
-
-        self.provider_forms = []
-        for provider in self.config_data.get('providers') or [dict(DEFAULT_PROVIDER)]:
-            self._add_provider_form(provider)
-
-    def _add_provider_form(self, provider):
-        """Tek provider kartı"""
-        card = tk.Frame(self.provider_box, bg=SURFACE_2, highlightthickness=1,
-                        highlightbackground=BORDER, padx=12, pady=10)
-        card.pack(fill='x', pady=(0, 8))
-
-        head = tk.Frame(card, bg=SURFACE_2)
-        head.pack(fill='x')
-        title = tk.Label(head, text=provider.get('name') or 'Sağlayıcı', bg=SURFACE_2,
-                         fg=TEXT, font=(self.ui_font, 10, 'bold'))
-        title.pack(side='left')
-
-        vars_ = {}
-        remove = self._button(head, 'Kaldır', None)
-        remove.config(command=lambda: self.remove_provider(card))
-        remove.pack(side='right')
-
-        rows = tk.Frame(card, bg=SURFACE_2)
-        rows.pack(fill='x', pady=(8, 0))
-        rows.columnconfigure(1, weight=1)
-        rows.columnconfigure(3, weight=1)
-
-        for position, (key, label, kind) in enumerate(PROVIDER_FIELDS):
-            value = provider.get(key, DEFAULT_PROVIDER.get(key))
-            if kind is bool:
-                var = tk.BooleanVar(value=bool(value))
-                widget = tk.Checkbutton(rows, variable=var, bg=SURFACE_2,
-                                        activebackground=SURFACE_2, selectcolor=SURFACE,
-                                        bd=0, highlightthickness=0)
-            else:
-                var = tk.StringVar(value='' if value is None else str(value))
-                widget = tk.Entry(rows, textvariable=var, bg=SURFACE, fg=TEXT,
-                                  insertbackground=TEXT, relief='flat', highlightthickness=1,
-                                  highlightbackground=BORDER, highlightcolor=ACCENT,
-                                  show='*' if kind == 'secret' else '',
-                                  font=(self.ui_font, 10))
-
-            row, column = divmod(position, 2)
-            tk.Label(rows, text=label, bg=SURFACE_2, fg=MUTED,
-                     font=(self.ui_font, 9)).grid(row=row * 2, column=column * 2,
-                                                  sticky='w', padx=(0, 8), pady=(4, 0))
-            widget.grid(row=row * 2 + 1, column=column * 2, columnspan=2,
-                        sticky='w' if kind is bool else 'we',
-                        padx=(0, 14), pady=(0, 6), ipady=0 if kind is bool else 4)
-            vars_[key] = var
-
-        self.provider_forms.append({'card': card, 'vars': vars_, 'title': title})
-
-    def add_provider(self):
-        number = len(self.provider_forms) + 1
-        provider = dict(DEFAULT_PROVIDER)
-        provider['name'] = f'Sağlayıcı {number}'
-        self._add_provider_form(provider)
-        self.provider_box.update_idletasks()
-
-    def remove_provider(self, card):
-        if len(self.provider_forms) <= 1:
-            messagebox.showinfo('Sağlayıcı', 'En az bir sağlayıcı kalmalı.')
-            return
-        for form in list(self.provider_forms):
-            if form['card'] is card:
-                self.provider_forms.remove(form)
-        card.destroy()
-
         footer = tk.Frame(self.settings_tab, bg=SURFACE, padx=12)
         footer.pack(fill='x', pady=(0, 12))
         self._button(footer, 'Ayarları kaydet', self._save_clicked, primary=True).pack(side='left')
@@ -453,6 +393,208 @@ class App(tk.Tk):
 
         tk.Label(footer, text='F5 başlat  ·  Esc durdur  ·  Ctrl+S kaydet',
                  bg=SURFACE, fg=MUTED, font=(self.ui_font, 9)).pack(side='right')
+
+
+    def _build_providers(self, parent):
+        """Provider listesi + ekle/düzenle/sil/test butonları"""
+        group = tk.Frame(parent, bg=SURFACE, highlightthickness=1,
+                         highlightbackground=BORDER, padx=14, pady=12)
+        group.grid(row=0, column=0, sticky='nsew', padx=(0, 12))
+        group.columnconfigure(0, weight=1)
+
+        head = tk.Frame(group, bg=SURFACE)
+        head.grid(row=0, column=0, sticky='ew')
+        tk.Label(head, text='Usenet sağlayıcıları', bg=SURFACE, fg=TEXT,
+                 font=(self.ui_font, 11, 'bold')).pack(side='left')
+        self._button(head, '+ Ekle', self.add_provider).pack(side='right')
+
+        self.provider_tree = ttk.Treeview(
+            group, columns=('name', 'host', 'conn', 'ssl'), show='headings',
+            height=6, selectmode='browse')
+        for column, title, width, anchor in (('name', 'Ad', 150, 'w'),
+                                             ('host', 'Sunucu', 210, 'w'),
+                                             ('conn', 'Bağlantı', 70, 'center'),
+                                             ('ssl', 'SSL', 50, 'center')):
+            self.provider_tree.heading(column, text=title, anchor=anchor)
+            self.provider_tree.column(column, width=width, anchor=anchor,
+                                      stretch=(column == 'host'))
+        self.provider_tree.tag_configure('odd', background=SURFACE_2)
+        self.provider_tree.grid(row=1, column=0, sticky='nsew', pady=(10, 8))
+        group.rowconfigure(1, weight=1)
+        self.provider_tree.bind('<Double-1>', lambda _e: self.edit_provider())
+        self.provider_tree.bind('<Return>', lambda _e: self.edit_provider())
+
+        actions = tk.Frame(group, bg=SURFACE)
+        actions.grid(row=2, column=0, sticky='w')
+        self._button(actions, 'Düzenle', self.edit_provider).pack(side='left')
+        self._button(actions, 'Sil', self.remove_provider).pack(side='left', padx=(8, 0))
+        self._button(actions, 'Bağlantıyı test et', self.test_providers).pack(
+            side='left', padx=(8, 0))
+
+        self._refresh_providers()
+
+    def _refresh_providers(self):
+        tree = self.provider_tree
+        tree.delete(*tree.get_children())
+        for position, provider in enumerate(self.config_data.get('providers') or []):
+            tree.insert('', 'end', iid=str(position),
+                        values=(provider.get('name') or provider.get('host') or '-',
+                                f"{provider.get('host') or '-'}:{provider.get('port')}",
+                                provider.get('connections'),
+                                'açık' if provider.get('use_ssl') else 'kapalı'),
+                        tags=('odd',) if position % 2 else ())
+
+    def _selected_provider(self):
+        selection = self.provider_tree.selection()
+        if not selection:
+            messagebox.showinfo('Sağlayıcı', 'Önce listeden bir sağlayıcı seçin.')
+            return None
+        return int(selection[0])
+
+    def add_provider(self):
+        providers = self.config_data.setdefault('providers', [])
+        provider = dict(DEFAULT_PROVIDER)
+        provider['name'] = f'Sağlayıcı {len(providers) + 1}'
+        provider = self._provider_dialog(provider, 'Sağlayıcı ekle')
+        if provider:
+            providers.append(provider)
+            self._refresh_providers()
+            self.provider_tree.selection_set(str(len(providers) - 1))
+
+    def edit_provider(self):
+        index = self._selected_provider()
+        if index is None:
+            return
+        providers = self.config_data['providers']
+        provider = self._provider_dialog(dict(providers[index]), 'Sağlayıcıyı düzenle')
+        if provider:
+            providers[index] = provider
+            self._refresh_providers()
+            self.provider_tree.selection_set(str(index))
+
+    def remove_provider(self):
+        index = self._selected_provider()
+        if index is None:
+            return
+        providers = self.config_data['providers']
+        if len(providers) <= 1:
+            messagebox.showinfo('Sağlayıcı', 'En az bir sağlayıcı kalmalı.')
+            return
+        name = providers[index].get('name') or 'Sağlayıcı'
+        if messagebox.askyesno('Sağlayıcı', f"'{name}' silinsin mi?"):
+            del providers[index]
+            self._refresh_providers()
+
+    def _provider_dialog(self, provider, title):
+        """Sağlayıcı ekleme/düzenleme penceresi (modal)"""
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=SURFACE)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+
+        body = tk.Frame(dialog, bg=SURFACE, padx=20, pady=16)
+        body.pack(fill='both', expand=True)
+        body.columnconfigure(1, weight=1)
+        tk.Label(body, text=title, bg=SURFACE, fg=TEXT,
+                 font=(self.ui_font, 12, 'bold')).grid(row=0, column=0, columnspan=2,
+                                                       sticky='w', pady=(0, 12))
+
+        vars_ = {}
+        for position, (key, label, kind) in enumerate(PROVIDER_FIELDS, start=1):
+            value = provider.get(key, DEFAULT_PROVIDER.get(key))
+            if kind is bool:
+                var = tk.BooleanVar(value=bool(value))
+                widget = tk.Checkbutton(body, variable=var, bg=SURFACE,
+                                        activebackground=SURFACE, selectcolor=SURFACE_2,
+                                        bd=0, highlightthickness=0)
+            else:
+                var = tk.StringVar(value='' if value is None else str(value))
+                widget = tk.Entry(body, textvariable=var, bg=SURFACE_2, fg=TEXT,
+                                  insertbackground=TEXT, relief='flat', highlightthickness=1,
+                                  highlightbackground=BORDER, highlightcolor=ACCENT,
+                                  show='*' if kind == 'secret' else '',
+                                  font=(self.ui_font, 10))
+            tk.Label(body, text=label, bg=SURFACE, fg=MUTED,
+                     font=(self.ui_font, 9)).grid(row=position, column=0, sticky='w',
+                                                  padx=(0, 12), pady=4)
+            widget.grid(row=position, column=1, sticky='w' if kind is bool else 'we',
+                        pady=4, ipady=0 if kind is bool else 4)
+            vars_[key] = var
+
+        status = tk.Label(body, text='', bg=SURFACE, fg=MUTED,
+                          font=(self.ui_font, 9), wraplength=340, justify='left')
+        status.grid(row=len(PROVIDER_FIELDS) + 1, column=0, columnspan=2,
+                    sticky='w', pady=(10, 0))
+
+        result = {}
+
+        def read_form():
+            return provider_from_vars(vars_)
+
+        def on_test():
+            try:
+                item = read_form()
+            except ValueError as exc:
+                status.config(text=str(exc), fg=RED)
+                return
+            status.config(text='Bağlanılıyor…', fg=MUTED)
+            self._test_provider_async(item, status)
+
+        def on_save():
+            try:
+                result.update(read_form())
+            except ValueError as exc:
+                status.config(text=str(exc), fg=RED)
+                return
+            dialog.destroy()
+
+        buttons = tk.Frame(body, bg=SURFACE)
+        buttons.grid(row=len(PROVIDER_FIELDS) + 2, column=0, columnspan=2,
+                     sticky='e', pady=(14, 0))
+        self._button(buttons, 'Bağlantıyı test et', on_test).pack(side='left', padx=(0, 8))
+        self._button(buttons, 'Kaydet', on_save, primary=True).pack(side='left')
+
+        dialog.bind('<Return>', lambda _e: on_save())
+        dialog.bind('<Escape>', lambda _e: dialog.destroy())
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 3
+        dialog.geometry(f'+{max(x, 0)}+{max(y, 0)}')
+        dialog.grab_set()
+        dialog.wait_window()
+        return result or None
+
+    def _test_provider_async(self, provider, label):
+        """Bağlantıyı arka planda dener, sonucu etikete yazar"""
+        label.config(text='Bağlanılıyor…', fg=MUTED)
+
+        def worker():
+            started = time.time()
+            try:
+                server = connect_to_server(provider)
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+                text, color = 'Bağlantı başarılı', GREEN
+            except Exception as exc:
+                text, color = f'Bağlantı başarısız: {exc}', RED
+            elapsed = time.time() - started
+            self.q.put(('provider_test', {'label': label,
+                                          'text': f'{text} ({elapsed:.1f} sn)',
+                                          'color': color}))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def test_providers(self):
+        """Listedeki tüm sağlayıcıları dener, sonucu satırın altındaki etikete yazar"""
+        providers = self.config_data.get('providers') or []
+        if not providers:
+            return
+        self._log('Sağlayıcı bağlantıları test ediliyor…', 'INFO')
+        for provider in providers:
+            self._test_provider_async(provider, self.save_hint)
 
     def _field_group(self, parent, title, column, fields):
         group = tk.Frame(parent, bg=SURFACE, highlightthickness=1,
@@ -545,29 +687,11 @@ class App(tk.Tk):
         return data
 
     def _provider_values(self):
-        """Formdaki provider kartlarını config biçimine çevir"""
-        providers = []
-        for form in self.provider_forms:
-            item = {}
-            for key, label, kind in PROVIDER_FIELDS:
-                raw = form['vars'][key].get()
-                if kind is bool:
-                    item[key] = bool(raw)
-                elif kind is int:
-                    try:
-                        item[key] = int(float(str(raw).strip().replace(',', '.')))
-                    except ValueError:
-                        raise ValueError(f'{label}: sayı bekleniyor ({raw!r})')
-                else:
-                    item[key] = str(raw).strip()
-            if not item['host']:
-                raise ValueError(f"{item['name'] or 'Sağlayıcı'}: sunucu adresi boş")
-            if not item['name']:
-                item['name'] = item['host']
-            providers.append(item)
+        """Listedeki provider'ları config biçiminde döndürür"""
+        providers = self.config_data.get('providers') or []
         if not providers:
             raise ValueError('En az bir sağlayıcı gerekli')
-        return providers
+        return [dict(provider) for provider in providers]
 
     def _pick_dir(self, var):
         folder = filedialog.askdirectory(initialdir=var.get() or str(Path.home()))
@@ -850,6 +974,10 @@ class App(tk.Tk):
             self.start_btn.config(state='normal')
             self.stop_btn.config(state='disabled', fg='#5b6270')
 
+        elif kind == 'provider_test':
+            label = data['label']
+            if label.winfo_exists():
+                label.config(text=data['text'], fg=data['color'])
         elif kind == 'log':
             self._log(data.get('level', 'INFO'), data.get('message', ''))
 

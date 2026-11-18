@@ -24,6 +24,18 @@ except ModuleNotFoundError:  # Python 3.13+ nntplib icermez
 from nntp_client import ArticleNotFound
 
 
+def connect_to_server(provider: dict, timeout: float = 30) -> Union[NNTP_SSL, NNTP]:
+    """Provider sözlüğüyle NNTP bağlantısı açar (motor ve GUI aynı yolu kullanır)"""
+    cls = NNTP_SSL if provider.get('use_ssl') else NNTP
+    return cls(
+        provider['host'],
+        port=provider.get('port', 563),
+        user=provider.get('username') or '',
+        password=provider.get('password') or '',
+        timeout=timeout
+    )
+
+
 class NZBChecker:
     """NZB dosyalarını kontrol eden ve sınıflandıran sınıf"""
 
@@ -146,14 +158,7 @@ class NZBChecker:
         provider = self.providers[index]
 
         try:
-            cls = NNTP_SSL if provider['use_ssl'] else NNTP
-            server = cls(
-                provider['host'],
-                port=provider['port'],
-                user=provider['username'],
-                password=provider['password'],
-                timeout=self.timeout
-            )
+            server = connect_to_server(provider, self.timeout)
             self.logger.info(f"Sunucuya bağlanıldı: {provider['name']} "
                              f"({provider['host']}:{provider['port']})")
             return server
