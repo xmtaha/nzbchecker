@@ -1,10 +1,45 @@
+# --- Python ---------------------------------------------------------------
 __pycache__/
 *.py[cod]
-nzb_checker.log
-.codegraph/
-# AppImage'lar release asset olarak yayınlanır
-*.AppImage
 *.egg-info/
 build/
 dist/
+.venv/
+venv/
+env/
+*.spec
+
+# --- Test / kalite araçları ----------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- Kullanıcıya özel çalışma zamanı dosyaları (gizli bilgi içerebilir) ---
+config.json
+last_scan.json
+nzb_checker.log
+*.log
+.env
+.env.*
+!.env.example
+
+# --- Yerel araçlar / geçici çalışma alanı ---------------------------------
+.codegraph/
 .tmp/
+agents.md
+
+# --- Editör / işletim sistemi --------------------------------------------
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Paketleme çıktıları (release asset olarak yayınlanır) ----------------
+*.AppImage
+*.AppImage.zsync
