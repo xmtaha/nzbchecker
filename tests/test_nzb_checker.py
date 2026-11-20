@@ -266,6 +266,31 @@ def test_olaylar(tmp, port, capture):
     assert done['moved'] is True, done
     assert dict(olaylar)['scan_end']['complete'] == 1, olaylar[-1]
     assert not dict(olaylar)['scan_end']['cancelled'], olaylar[-1]
+    # hatalı dosya sayacı 'error'; hata mesajı yoksa alan da yok (GUI sahte hata açmasın)
+    assert 'error_message' not in dict(olaylar)['scan_end'], olaylar[-1]
+
+
+def test_erisilemeyen_saglayici(tmp, capture):
+    """Hiçbir sağlayıcıya bağlanılamazsa scan_end hata mesajı taşır ama sayacı bozmaz"""
+    nzb_dir = Path(tmp) / 'dead'
+    nzb_dir.mkdir()
+    (nzb_dir / 'x.nzb').write_text(nzb(['ok-m1@test']), encoding='utf-8')
+
+    dead = socket.socket()
+    dead.bind(('127.0.0.1', 0))
+    dead_port = dead.getsockname()[1]
+    dead.close()
+    providers = [{'name': 'Olu', 'host': '127.0.0.1', 'port': dead_port, 'username': 'u',
+                  'password': 'p', 'use_ssl': False, 'connections': 2}]
+
+    olaylar = []
+    checker = NZBChecker(str(write_config(tmp, nzb_dir, dead_port, providers=providers)),
+                         events=lambda kind, **data: olaylar.append((kind, data)))
+    checker.process_nzb_files()
+
+    son = dict(olaylar)['scan_end']
+    assert son['error_message'] and son['error'] == 0, son
+    assert placed_in(nzb_dir)['error'] == [], placed_in(nzb_dir)
 
 
 def test_iptal(tmp, port, capture):
@@ -582,10 +607,12 @@ def main():
         os.environ['XDG_CACHE_HOME'] = str(Path(tmp) / 'xdg-cache')
         test_siniflandirma(tmp, port, capture)
         test_paralel_tam_tarama(tmp, port, capture)
+        test_ornek_rozeti(tmp, port, capture)
         test_tam_dosya(tmp, port, capture)
         test_alt_klasor(tmp, port, capture)
         test_onbellek_ttl(tmp, port, capture)
         test_olaylar(tmp, port, capture)
+        test_erisilemeyen_saglayici(tmp, capture)
         test_iptal(tmp, port, capture)
         test_tasima_cakismasi(tmp, port, capture)
         test_saglayici_hatasi(tmp, port, capture)

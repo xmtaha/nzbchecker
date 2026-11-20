@@ -82,7 +82,7 @@ Testler `XDG_CACHE_HOME`'u geçici dizine çevirir ve `os.chdir(tmp)` yapar; ger
    dosyaları atlar** (yoksa taşınmış dosyalar sonsuz yeniden taranır).
 2. `_preflight()` — her provider'a tek bağlantıyla paralel erişim denemesi. Erişilemeyen
    provider o taramada tamamen atlanır. **Hiçbiri erişilemiyorsa** dosya taşınmaz,
-   `scan_end` `error` ile yayınlanır.
+   `scan_end` `error_message` ile yayınlanır (sayacı taşıyan `error` alanı değişmez).
 3. `segments_to_check()` — örneklem seçimi:
    `sample = min(total, max(sample_check_count, int(total * sample_ratio)))`.
    `check_all_articles` veya `sample >= total` ise tüm segmentler; değilse ilk+son dahil
@@ -132,7 +132,8 @@ present, checked_at)`, WAL, thread-safe.
   `settings.cache=false` ile tamamen kapatılır.
 - SQLite açılamazsa önbellek **sessizce** devre dışı kalır; tarama sürer.
 - `_check_chunk` önce `get_many` ile taze kayıtları kullanır; yalnızca kalanlar için STAT
-  gönderir; sonuçları `put_many` ile yazar. Dilim hatasında yazım yapılmaz.
+  gönderir; sonuçları `put_many` ile yazar. Dilim hatasında o ana kadar yanıtlanan
+  id'ler yine yazılır (geçerli sonuç ziyan olmasın); eksik kalanlar sonraki sağlayıcıya sorulur.
 
 ## 7. Olay protokolü (motor → GUI)
 
@@ -148,7 +149,7 @@ Dinleyici hatası iş akışını bozmaz (loglanır). Alan adları GUI tarafınd
 | `file_done` | `name`, `status`, `segments`, `checked`, `missing`, `percent`, `providers`, `moved`, `elapsed`, `checked_all` (iptalde yok) | Satır güncellenir, sayaç/log |
 | `file_error` | `name`, `message` | Log'a hata |
 | `progress` | `completed`, `total` | Genel ilerleme çubuğu |
-| `scan_end` | `total`, `complete`, `missing`, `error`, `cancelled`, `move_failed`, `elapsed`, `segments`, `checked_segments`, `missing_segments`, `provider_stats`; hata varsa `error` | Özet, durum, düğmeler |
+| `scan_end` | `total`, `complete`, `missing`, `error` (hatalı dosya sayısı), `cancelled`, `move_failed`, `elapsed`, `segments`, `checked_segments`, `missing_segments`, `provider_stats`; bağlantı hatası varsa ayrıca `error_message` | Özet, durum, düğmeler |
 | `fatal` | `message` | Hata diyaloğu |
 
 `status` değerleri: `queued`, `running`, `complete`, `missing`, `error`, `cancelled`.

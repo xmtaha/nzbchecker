@@ -36,9 +36,9 @@ class ProviderDialog(tk.Toplevel):
             value = provider.get(key, DEFAULT_PROVIDER.get(key))
             if kind is bool:
                 var = tk.BooleanVar(value=bool(value))
-                widget = tk.Checkbutton(body, variable=var, bg=SURFACE,
-                                        activebackground=SURFACE, selectcolor=SURFACE_2,
-                                        bd=0, highlightthickness=0)
+                widget = tk.Checkbutton(body, variable=var, bg=SURFACE, fg=TEXT,
+                                        activebackground=SURFACE, activeforeground=TEXT,
+                                        selectcolor=ACCENT, bd=0, highlightthickness=0)
             else:
                 var = tk.StringVar(value='' if value is None else str(value))
                 widget = tk.Entry(body, textvariable=var, bg=SURFACE_2, fg=TEXT,
@@ -449,7 +449,7 @@ class UpdateDialog(tk.Toplevel):
         tk.Checkbutton(body, text='Bu sürümü bir daha gösterme',
                        variable=self.skip_var, bg=SURFACE, fg=TEXT,
                        activebackground=SURFACE, activeforeground=TEXT,
-                       selectcolor=SURFACE_2, bd=0, highlightthickness=0,
+                       selectcolor=ACCENT, bd=0, highlightthickness=0,
                        font=(app.ui_font, 9)).grid(row=5, column=0, sticky='w',
                                                    pady=(10, 0))
 

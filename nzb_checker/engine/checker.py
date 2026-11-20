@@ -31,14 +31,6 @@ class ConfigError(Exception):
     """Ayar dosyası okunamadı veya kullanılabilir sağlayıcı yok"""
 
 
-def output_folders(paths: dict) -> Dict[str, Path]:
-    """Yapılandırmadaki çıktı klasörlerini (complete/missing/error) çözer"""
-    base = Path(paths['nzb_folder'])
-    return {key: base / paths[key]
-            for key in ('complete', 'missing', 'error')
-            if paths.get(f'{key}_folder')}
-
-
 def iter_nzb_files(nzb_folder: Path, exclude: Iterable[Path] = ()) -> List[Path]:
     """
     NZB dosyalarını alt klasörler dahil listeler.
@@ -145,7 +137,7 @@ class NZBChecker:
         if not isinstance(stats, dict):
             return providers
 
-        def rate(index: int, provider: Dict) -> float:
+        def rate(provider: Dict) -> float:
             item = stats.get(provider.get('name')) or {}
             try:
                 asked = int(item.get('stat') or 0)
@@ -155,7 +147,7 @@ class NZBChecker:
             return (asked - missing) / asked if asked else 0.5
 
         order = sorted(range(len(providers)),
-                       key=lambda i: rate(i, providers[i]), reverse=True)  # stabil
+                       key=lambda i: rate(providers[i]), reverse=True)  # stabil
         return [providers[i] for i in order]
 
     def load_providers(self) -> List[Dict]:
@@ -201,38 +193,51 @@ class NZBChecker:
         """Log ayarlarını yapar"""
         log_level = getattr(logging, self.config.get('settings', {}).get('log_level', 'INFO'), logging.INFO)
         root = logging.getLogger()
-        if not root.handlers:  # GUI tekrar çalıştırınca handler'ları çoğaltma
-            handlers = [logging.StreamHandler()]
+        fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        # GUI root'a kendi handler'ını eklediği için basicConfig işe yaramaz;
+        # dosya handler'ı yoksa doğrudan ekle (tekrar çalıştırınca çoğaltma)
+        if not any(isinstance(h, logging.FileHandler) for h in root.handlers):
             # log'u çalışma dizinine değil kullanıcı cache dizinine yaz:
             # AppImage salt-okunur yerden açıldığında da yazılabilir olur
             try:
                 log_dir = default_state_dir()
                 log_dir.mkdir(parents=True, exist_ok=True)
-                handlers.insert(0, logging.FileHandler(
-                    log_dir / 'nzb_checker.log', encoding='utf-8'))
+                handler = logging.FileHandler(
+                    log_dir / 'nzb_checker.log', encoding='utf-8')
+                handler.setFormatter(fmt)
+                root.addHandler(handler)
             except OSError as e:
                 print(f"Log dosyası açılamadı, yalnızca konsola yazılacak: {e}",
                       file=sys.stderr)
-            logging.basicConfig(
-                level=log_level,
-                format='%(asctime)s - %(levelname)s - %(message)s',
-                handlers=handlers
-            )
+        if not any(type(h) is logging.StreamHandler for h in root.handlers):
+            handler = logging.StreamHandler()
+            handler.setFormatter(fmt)
+            root.addHandler(handler)
         root.setLevel(log_level)
         self.logger = logging.getLogger(__name__)
 
     def setup_folders(self):
-        """Output klasörlerini oluşturur"""
-        nzb_folder = Path(self.config['paths']['nzb_folder'])
+        """Output klasörlerini oluşturur
 
-        self.folders = {
-            'complete': nzb_folder / self.config['paths']['complete_folder'],
-            'missing': nzb_folder / self.config['paths']['missing_folder'],
-            'error': nzb_folder / self.config['paths']['error_folder']
-        }
+        Raises:
+            ConfigError: paths bölümü eksik veya klasör oluşturulamadı
+        """
+        try:
+            paths = self.config['paths']
+            nzb_folder = Path(paths['nzb_folder'])
+            self.folders = {
+                'complete': nzb_folder / paths['complete_folder'],
+                'missing': nzb_folder / paths['missing_folder'],
+                'error': nzb_folder / paths['error_folder']
+            }
+        except (KeyError, TypeError) as e:
+            raise ConfigError(f"Config içinde eksik ayar: {e}") from e
 
         for folder in self.folders.values():
-            folder.mkdir(parents=True, exist_ok=True)
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                raise ConfigError(f"Klasör oluşturulamadı ({folder}): {e}") from e
             self.logger.info(f"Klasör hazır: {folder}")
 
     def _emit(self, kind: str, **data):
@@ -350,7 +355,8 @@ class NZBChecker:
         Bir segment dilimini tek provider üzerinde kontrol eder.
 
         Önce önbelleğe bakılır; önbellekte olmayan id'ler için STAT gönderilir.
-        Dilim içinde hata olursa sonuçlar kaydedilmez (sonraki provider tekrar sorar).
+        Dilim içinde hata olursa o ana kadar yanıtlananlar yine önbelleğe yazılır,
+        kalanlar sonraki sağlayıcıya sorulur.
 
         Returns:
             (kontrol edilen id'ler, eksik id'ler)
@@ -479,7 +485,6 @@ class NZBChecker:
         return {
             'total': len(segments),
             'ids': [s['message_id'] for s in targets],
-            'all_ids': [s['message_id'] for s in segments],
             'found': set(),          # herhangi bir sağlayıcının bulduğu id'ler
             'answered': set(),       # en az bir sağlayıcının yanıtladığı id'ler
             'stage': 0,              # sıradaki provider
@@ -654,7 +659,6 @@ class NZBChecker:
         total_files = len(nzb_files)
         self.stats = {'total': total_files, 'complete': 0, 'missing': 0, 'error': 0}
         self.logger.info(f"Toplam {total_files} NZB dosyası bulundu")
-        self.logger.info(f"{len(self.providers)} provider, toplam paralel bağlantı: {self.max_workers}")
         if self.cache is not None and self.cache.enabled:
             self.logger.info(f"Sonuç önbelleği: {self.cache.path}")
         for provider in self.providers:
@@ -674,6 +678,7 @@ class NZBChecker:
         usable = sum(1 for ok in self._provider_ok if ok)
         workers = max(1, sum(p['connections'] for i, p in enumerate(self.providers)
                              if self._provider_ok[i]))
+        self.logger.info(f"{usable} provider kullanılabilir, toplam paralel bağlantı: {workers}")
         if self.cache is not None:
             self.cache.prune()
 
@@ -686,6 +691,8 @@ class NZBChecker:
             if not state.get('finished') or state.get('counted'):
                 return
             state['counted'] = True
+            # büyük NZB'lerde tüm dosyaların segment listelerini bellekte tutma
+            pending.pop(nzb_path, None)
             completed += 1
             self._emit('progress', completed=completed, total=total_files)
             if completed % 10 == 0:
@@ -723,7 +730,9 @@ class NZBChecker:
                     done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
                     for future in done:
                         nzb_path, index = futures.pop(future)
-                        state = pending[nzb_path]
+                        state = pending.get(nzb_path)
+                        if state is None:  # dosya bitmiş/iptal edilmiş, pending'den düşmüş
+                            continue
                         state['left'] -= 1
 
                         try:
@@ -827,8 +836,10 @@ class NZBChecker:
             'move_failed': self.move_failed,
         })
         payload.update(self._scan_metrics())
+        # 'error' stats içinde hatalı dosya sayısıdır; hata mesajı ayrı anahtarda
+        # taşınır (yoksa GUI mesajı sayı sanıp sahte hata penceresi açıyordu)
         if error:
-            payload['error'] = error
+            payload['error_message'] = error
         if not cancelled and not error:
             save_scan_history({
                 'finished_at': time.time(),

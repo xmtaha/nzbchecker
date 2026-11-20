@@ -31,8 +31,10 @@ from .theme import (ACCENT, ACCENT_DARK, AMBER, BG, BORDER, GREEN, MUTED,
                     SURFACE_2, SURFACE_3, TEXT, PATH_FIELDS, CHECK_FIELDS, pick_font)
 from .widgets import QueueLogHandler, provider_text
 
-# tkdnd Tcl paketi (sürükle-bırak); AppImage'da da yanında taşınır
-DND_DIR = Path(__file__).resolve().parent.parent.parent / 'tkdnd'
+# tkdnd Tcl paketi (sürükle-bırak); kaynaktan çalışırken depo kökünde,
+# AppImage içinde derleme betiğinin kopyaladığı gui/tkdnd altında
+BASE_DIR = Path(__file__).resolve().parent
+DND_DIRS = (BASE_DIR / 'tkdnd', BASE_DIR.parent.parent / 'tkdnd')
 
 class App(tk.Tk):
     def __init__(self):
@@ -52,7 +54,7 @@ class App(tk.Tk):
         self._sort_column = None  # başlığa tıklanınca sıralama sütunu
         self._sort_desc = False
         self._sort_pending = False
-        self.counts = {'complete': 0, 'missing': 0, 'error': 0}
+        self.counts = {'complete': 0, 'missing': 0, 'error': 0, 'cancelled': 0}
         self.listed = 0
         self.checker = None
         self.worker = None
@@ -253,7 +255,7 @@ class App(tk.Tk):
         tk.Checkbutton(bar, text='Sadece eksik/hatalı', variable=self.only_problems,
                        command=self._apply_filter, bg=SURFACE, fg=TEXT,
                        activebackground=SURFACE, activeforeground=TEXT,
-                       selectcolor=SURFACE_2, bd=0, highlightthickness=0,
+                       selectcolor=ACCENT, bd=0, highlightthickness=0,
                        font=(self.ui_font, 10)).pack(side='left')
 
         self.partial_missing = tk.BooleanVar(value=False)
@@ -261,7 +263,7 @@ class App(tk.Tk):
                        variable=self.partial_missing,
                        command=self._apply_filter, bg=SURFACE, fg=TEXT,
                        activebackground=SURFACE, activeforeground=TEXT,
-                       selectcolor=SURFACE_2, bd=0, highlightthickness=0,
+                       selectcolor=ACCENT, bd=0, highlightthickness=0,
                        font=(self.ui_font, 10)).pack(side='left', padx=(18, 0))
 
         self.count_label = tk.Label(bar, text='0 dosya', bg=SURFACE, fg=MUTED,
@@ -477,7 +479,7 @@ class App(tk.Tk):
         providers = self.config_data.get('providers') or []
         if not providers:
             return
-        self._log('Sağlayıcı bağlantıları test ediliyor…', 'INFO')
+        self._log('INFO', 'Sağlayıcı bağlantıları test ediliyor…')
         for provider in providers:
             self._test_provider_async(provider, self.save_hint)
 
@@ -501,9 +503,9 @@ class App(tk.Tk):
 
             if kind is bool:
                 var = tk.BooleanVar(value=bool(value))
-                widget = tk.Checkbutton(group, variable=var, bg=SURFACE,
-                                        activebackground=SURFACE, selectcolor=SURFACE_2,
-                                        bd=0, highlightthickness=0)
+                widget = tk.Checkbutton(group, variable=var, bg=SURFACE, fg=TEXT,
+                                        activebackground=SURFACE, activeforeground=TEXT,
+                                        selectcolor=ACCENT, bd=0, highlightthickness=0)
             elif isinstance(kind, tuple):
                 var = tk.StringVar(value=str(value))
                 widget = ttk.Combobox(group, textvariable=var, values=list(kind),
@@ -699,7 +701,7 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children(''))
         self.rows.clear()
         self.order.clear()
-        self.counts = {'complete': 0, 'missing': 0, 'error': 0}
+        self.counts = {'complete': 0, 'missing': 0, 'error': 0, 'cancelled': 0}
         self.listed = 0
         self.progress['value'] = 0
         self.summary_label.config(text='Hazır')
@@ -807,7 +809,7 @@ class App(tk.Tk):
         self._apply_sort()
 
     def _refresh_counts(self):
-        done = self.counts['complete'] + self.counts['missing'] + self.counts['error']
+        done = sum(self.counts.values())
         values = {'total': self.listed, 'complete': self.counts['complete'],
                   'missing': self.counts['missing'], 'error': self.counts['error'],
                   'pending': max(0, self.listed - done) if self.listed else 0}
@@ -829,7 +831,8 @@ class App(tk.Tk):
         kullanıcı "Klasör seç" düğmesini kullanmaya devam eder.
         """
         try:
-            self.tk.eval(f'lappend auto_path {{{DND_DIR}}}')
+            for candidate in DND_DIRS:
+                self.tk.eval(f'lappend auto_path {{{candidate}}}')
             self.tk.eval('package require tkdnd')
         except tk.TclError as exc:
             self.dnd_ready = False
@@ -1053,7 +1056,7 @@ class App(tk.Tk):
 
         elif kind == 'scan_end':
             self.progress['value'] = self.progress['maximum']
-            error = data.get('error')
+            error = data.get('error_message')
             if error:
                 self._log('ERROR', error)
                 self.summary_label.config(text=error)
